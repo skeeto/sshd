@@ -776,8 +776,8 @@ static b32 proc_spawn(Proc *p, Str shell, Str cmd,
 
     EnterCriticalSection(&spawn_lock);
     b32 ok = CreatePipe(&in_r, &in_w, &sa, 0) &&
-             CreatePipe(&out_r, &out_w, &sa, 0) &&
-             CreatePipe(&err_r, &err_w, &sa, 0);
+             CreatePipe(&out_r, &out_w, &sa, 1<<16) &&
+             CreatePipe(&err_r, &err_w, &sa, 1<<16);
     if (ok) {
         SetHandleInformation(in_w, HANDLE_FLAG_INHERIT, 0);
         SetHandleInformation(out_r, HANDLE_FLAG_INHERIT, 0);

@@ -2403,8 +2403,11 @@ static b32 send_channel_data(Conn *c, u8 const *data, iz len, i32 which)
     return send_packet(c, buf, w.len);
 }
 
-static void pump_output(Conn *c)
+// Forward child output within the peer's window. Returns true if any
+// data was sent.
+static b32 pump_output(Conn *c)
 {
+    b32 sent = 0;
     for (i32 which = 0; which < 2; which++) {
         while (c->win_remote > 0) {
             iz avail = proc_pending(&c->proc, which);
@@ -2424,11 +2427,13 @@ static void pump_output(Conn *c)
                 break;
             }
             if (!send_channel_data(c, buf, got, which)) {
-                return;
+                return sent;
             }
             c->win_remote -= (u32)got;
+            sent = 1;
         }
     }
+    return sent;
 }
 
 static b32 finish_child(Conn *c)
@@ -2686,8 +2691,9 @@ static void session_phase(Conn *c)
                 return;
             }
         }
+        b32 busy = 0;
         if (c->child_started) {
-            pump_output(c);
+            busy = pump_output(c);
             if (!c->sent_close && !adjust_window(c)) {
                 return;
             }
@@ -2701,7 +2707,7 @@ static void session_phase(Conn *c)
         if (c->sent_close && c->got_close) {
             return;
         }
-        if (a == 0 && sock_wait(c->sock, 10) < 0) {
+        if (a == 0 && !busy && sock_wait(c->sock, 10) < 0) {
             return;
         }
     }
@@ -3664,8 +3670,8 @@ static b32 proc_spawn(Proc *p, Str shell, Str cmd,
 
     EnterCriticalSection(&spawn_lock);
     b32 ok = CreatePipe(&in_r, &in_w, &sa, 0) &&
-             CreatePipe(&out_r, &out_w, &sa, 0) &&
-             CreatePipe(&err_r, &err_w, &sa, 0);
+             CreatePipe(&out_r, &out_w, &sa, 1<<16) &&
+             CreatePipe(&err_r, &err_w, &sa, 1<<16);
     if (ok) {
         SetHandleInformation(in_w, HANDLE_FLAG_INHERIT, 0);
         SetHandleInformation(out_r, HANDLE_FLAG_INHERIT, 0);
