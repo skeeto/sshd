@@ -1,4 +1,5 @@
-// Win32 platform layer: no CRT, kernel32/ws2_32/advapi32 only.
+// Win32 platform layer: no CRT, kernel32/ws2_32/advapi32/shell32 only.
+// Win32 calls use the W APIs; strings are UTF-8 and converted at the boundary.
 // This is free and unencumbered software released into the public domain.
 //
 // Build (32-bit Windows XP):
@@ -10,31 +11,33 @@
 #include "ssh.cpp"
 
 enum : i32 {
-    CREATE_ALWAYS            = 2,
-    CREATE_NO_WINDOW         = 0x08000000,
-    CRYPT_VERIFYCONTEXT      = (i32)0xF0000000,
-    FILE_ATTRIBUTE_NORMAL    = 0x80,
-    FILE_SHARE_READ          = 1,
-    FIONBIO                  = (i32)0x8004667e,
-    GENERIC_READ             = (i32)0x80000000,
-    GENERIC_WRITE            = 0x40000000,
-    HANDLE_FLAG_INHERIT      = 1,
-    INVALID_FILE_ATTRIBUTES  = -1,
-    MEM_COMMIT               = 0x1000,
-    MEM_RESERVE              = 0x2000,
-    OPEN_EXISTING            = 3,
-    PAGE_READWRITE           = 4,
-    PROV_RSA_FULL            = 1,
-    STARTF_USESTDHANDLES     = 0x100,
-    STD_ERROR_HANDLE         = -12,
-    WAIT_OBJECT_0            = 0,
-    AF_INET                  = 2,
-    SOCK_STREAM              = 1,
-    IPPROTO_TCP              = 6,
-    SOL_SOCKET               = 0xffff,
-    SO_REUSEADDR             = 4,
-    TCP_NODELAY              = 1,
-    WSAEWOULDBLOCK           = 10035,
+    CP_UTF8                    = 65001,
+    CREATE_ALWAYS              = 2,
+    CREATE_NO_WINDOW           = 0x08000000,
+    CREATE_UNICODE_ENVIRONMENT = 0x00000400,
+    CRYPT_VERIFYCONTEXT        = (i32)0xF0000000,
+    FILE_ATTRIBUTE_NORMAL      = 0x80,
+    FILE_SHARE_READ            = 1,
+    FIONBIO                    = (i32)0x8004667e,
+    GENERIC_READ               = (i32)0x80000000,
+    GENERIC_WRITE              = 0x40000000,
+    HANDLE_FLAG_INHERIT        = 1,
+    INVALID_FILE_ATTRIBUTES    = -1,
+    MEM_COMMIT                 = 0x1000,
+    MEM_RESERVE                = 0x2000,
+    OPEN_EXISTING              = 3,
+    PAGE_READWRITE             = 4,
+    PROV_RSA_FULL              = 1,
+    STARTF_USESTDHANDLES       = 0x100,
+    STD_ERROR_HANDLE           = -12,
+    WAIT_OBJECT_0              = 0,
+    AF_INET                    = 2,
+    SOCK_STREAM                = 1,
+    IPPROTO_TCP                = 6,
+    SOL_SOCKET                 = 0xffff,
+    SO_REUSEADDR               = 4,
+    TCP_NODELAY                = 1,
+    WSAEWOULDBLOCK             = 10035,
 };
 
 enum : uz {
@@ -52,11 +55,11 @@ struct CriticalSection {  // opaque CRITICAL_SECTION
     uz opaque[8];
 };
 
-struct StartupInfo {  // STARTUPINFOA
+struct StartupInfo {  // STARTUPINFOW
     u32 cb;
-    char *lpReserved;
-    char *lpDesktop;
-    char *lpTitle;
+    u16 *lpReserved;
+    u16 *lpDesktop;
+    u16 *lpTitle;
     u32 dwX, dwY, dwXSize, dwYSize;
     u32 dwXCountChars, dwYCountChars, dwFillAttribute, dwFlags;
     u16 wShowWindow, cbReserved2;
@@ -90,25 +93,28 @@ struct Timeval {
 
 #define W32(r, p) extern "C" __declspec(dllimport) r __stdcall p noexcept
 W32(b32,    CloseHandle(uz));
-W32(uz,     CreateFileA(char *, u32, u32, void *, u32, u32, uz));
+W32(u16 **, CommandLineToArgvW(u16 const *, i32 *));
+W32(uz,     CreateFileW(u16 const *, u32, u32, void *, u32, u32, uz));
 W32(b32,    CreatePipe(uz *, uz *, void *, u32));
-W32(b32,    CreateProcessA(char *, char *, void *, void *, b32, u32,
-                           void *, char *, void *, void *));
+W32(b32,    CreateProcessW(u16 const *, u16 *, void *, void *, b32, u32,
+                           void *, u16 const *, void *, void *));
 W32(uz,     CreateThread(void *, uz, u32 (__stdcall *)(void *), void *, u32, u32 *));
 W32(void,   DeleteCriticalSection(void *));
 W32(void,   EnterCriticalSection(void *));
 W32(void,   ExitProcess[[noreturn]](u32));
-W32(b32,    FreeEnvironmentStringsA(char *));
-W32(char *, GetCommandLineA());
-W32(char *, GetEnvironmentStringsA());
+W32(b32,    FreeEnvironmentStringsW(u16 *));
+W32(u16 *,  GetCommandLineW());
+W32(u16 *,  GetEnvironmentStringsW());
 W32(b32,    GetExitCodeProcess(uz, u32 *));
-W32(u32,    GetFileAttributesA(char *));
+W32(u32,    GetFileAttributesW(u16 const *));
 W32(u32,    GetFileSize(uz, u32 *));
 W32(u32,    GetLastError());
-W32(u32,    GetModuleFileNameA(uz, char *, u32));
+W32(u32,    GetModuleFileNameW(uz, u16 *, u32));
 W32(uz,     GetStdHandle(i32));
 W32(void,   InitializeCriticalSection(void *));
 W32(void,   LeaveCriticalSection(void *));
+W32(uz,     LocalFree(uz));
+W32(i32,    MultiByteToWideChar(u32, u32, char const *, i32, u16 *, i32));
 W32(b32,    PeekNamedPipe(uz, void *, u32, u32 *, u32 *, u32 *));
 W32(b32,    ReadFile(uz, void *, u32, u32 *, void *));
 W32(b32,    SetHandleInformation(uz, u32, u32));
@@ -116,6 +122,8 @@ W32(void,   Sleep(u32));
 W32(b32,    TerminateProcess(uz, u32));
 W32(byte *, VirtualAlloc(uz, uz, u32, u32));
 W32(u32,    WaitForSingleObject(uz, u32));
+W32(i32,    WideCharToMultiByte(u32, u32, u16 const *, i32, char *, i32,
+                                char const *, b32 *));
 W32(b32,    WriteFile(uz, void const *, u32, u32 *, void *));
 W32(i32,    WSAStartup(u16, void *));
 W32(i32,    WSAGetLastError());
@@ -129,7 +137,7 @@ W32(i32,    select(i32, void *, void *, void *, void *));
 W32(i32,    send(uz, char const *, i32, i32));
 W32(i32,    setsockopt(uz, i32, i32, char const *, i32));
 W32(uz,     socket(i32, i32, i32));
-W32(b32,    CryptAcquireContextA(uz *, char *, char *, u32, u32));
+W32(b32,    CryptAcquireContextW(uz *, u16 const *, u16 const *, u32, u32));
 W32(b32,    CryptGenRandom(uz, u32, u8 *));
 W32(b32,    CryptReleaseContext(uz, u32));
 
@@ -188,6 +196,65 @@ extern "C" uz strlen(char const *s)
 }
 #endif
 
+// UTF-8 <-> UTF-16 conversion. Invalid UTF-8 becomes U+FFFD.
+
+static iz utf8_to_wide(u16 *dst, iz cap, Str s)
+{
+    i32 n = MultiByteToWideChar(CP_UTF8, 0, (char const *)s.data, (i32)s.len,
+                                dst, (i32)cap);
+    return n > 0 ? (iz)n : 0;
+}
+
+static iz utf8_count16(Str s)
+{
+    return utf8_to_wide(0, 0, s);
+}
+
+static u16 *utf8_to_wide_alloc(Arena *a, Str s)
+{
+    u16 *w = alloc<u16>(a, s.len + 1);
+    iz n = utf8_to_wide(w, s.len + 1, s);
+    w[n] = 0;
+    return w;
+}
+
+static iz wstrlen(u16 const *s)
+{
+    iz n = 0;
+    while (s[n]) {
+        n++;
+    }
+    return n;
+}
+
+static Str wide_to_utf8(Arena *a, u16 const *s, iz len)
+{
+    i32 n = WideCharToMultiByte(CP_UTF8, 0, s, (i32)len, 0, 0, 0, 0);
+    if (n <= 0) {
+        return {};
+    }
+    u8 *buf = allocbytes(a, n);
+    WideCharToMultiByte(CP_UTF8, 0, s, (i32)len, (char *)buf, n, 0, 0);
+    return {buf, (iz)n};
+}
+
+// Case-insensitive ASCII equality on UTF-16.
+static b32 w_iequals(u16 const *a, iz alen, u16 const *b, iz blen)
+{
+    if (alen != blen) {
+        return 0;
+    }
+    for (iz i = 0; i < alen; i++) {
+        u16 x = a[i], y = b[i];
+        if (x>='A' && x<='Z') x += 32;
+        if (y>='A' && y<='Z') y += 32;
+        if (x != y) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
 static CriticalSection log_lock;
 static CriticalSection spawn_lock;
 static b32 selftest_flag;
@@ -225,7 +292,7 @@ static void os_log(Str s)
 static void os_random(u8 *buf, iz len)
 {
     uz prov = 0;
-    if (!CryptAcquireContextA(&prov, 0, 0, PROV_RSA_FULL, CRYPT_VERIFYCONTEXT)) {
+    if (!CryptAcquireContextW(&prov, 0, 0, PROV_RSA_FULL, CRYPT_VERIFYCONTEXT)) {
         os_log("sshd: cannot acquire crypto provider");
         ExitProcess(1);
     }
@@ -245,23 +312,26 @@ static void os_random(u8 *buf, iz len)
 
 // Files
 
-static b32 pathbuf(char *dst, iz cap, Str path)
+static b32 pathbuf(u16 *dst, iz cap, Str path)
 {
-    if (path.len >= cap) {
+    if (cap < 1) {
         return 0;
     }
-    copybytes(dst, path.data, path.len);
-    dst[path.len] = 0;
+    iz n = utf8_to_wide(dst, cap-1, path);
+    if (!n && path.len) {
+        return 0;
+    }
+    dst[n] = 0;
     return 1;
 }
 
 static b32 os_readfile(Arena *a, Str path, Str *out)
 {
-    char pbuf[512];
-    if (!pathbuf(pbuf, sizeof(pbuf), path)) {
+    u16 pbuf[512];
+    if (!pathbuf(pbuf, countof(pbuf), path)) {
         return 0;
     }
-    uz h = CreateFileA(pbuf, GENERIC_READ, FILE_SHARE_READ, 0,
+    uz h = CreateFileW(pbuf, GENERIC_READ, FILE_SHARE_READ, 0,
                        OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, 0);
     if (h == INVALID_HANDLE_VALUE) {
         return 0;
@@ -288,11 +358,11 @@ static b32 os_readfile(Arena *a, Str path, Str *out)
 
 static b32 os_writefile(Str path, u8 const *data, iz len)
 {
-    char pbuf[512];
-    if (!pathbuf(pbuf, sizeof(pbuf), path)) {
+    u16 pbuf[512];
+    if (!pathbuf(pbuf, countof(pbuf), path)) {
         return 0;
     }
-    uz h = CreateFileA(pbuf, GENERIC_WRITE, 0, 0,
+    uz h = CreateFileW(pbuf, GENERIC_WRITE, 0, 0,
                        CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, 0);
     if (h == INVALID_HANDLE_VALUE) {
         return 0;
@@ -455,12 +525,28 @@ static void append_arg(u8 *buf, iz cap, iz *len, Str arg)
     }
 }
 
-static u8 *build_env(Arena *a, Slice<Str> names, Slice<Str> vals)
+static u16 *build_env(Arena *a, Slice<Str> names, Slice<Str> vals)
 {
-    char *parent = GetEnvironmentStringsA();
+    iz n = names.len;
+    u16 **wname = alloc<u16 *>(a, n);
+    u16 **wval  = alloc<u16 *>(a, n);
+    iz   *wnlen = alloc<iz>(a, n);
+    iz   *wvlen = alloc<iz>(a, n);
+    for (iz i = 0; i < n; i++) {
+        wnlen[i] = utf8_count16(names[i]);
+        wname[i] = alloc<u16>(a, wnlen[i]+1);
+        utf8_to_wide(wname[i], wnlen[i], names[i]);
+        wname[i][wnlen[i]] = 0;
+        wvlen[i] = utf8_count16(vals[i]);
+        wval[i]  = alloc<u16>(a, wvlen[i]+1);
+        utf8_to_wide(wval[i], wvlen[i], vals[i]);
+        wval[i][wvlen[i]] = 0;
+    }
+
+    u16 *parent = GetEnvironmentStringsW();
     iz total = 0;
     if (parent) {
-        char *q = parent;
+        u16 *q = parent;
         while (*q) {
             iz l = 0;
             while (q[l]) l++;
@@ -468,45 +554,42 @@ static u8 *build_env(Arena *a, Slice<Str> names, Slice<Str> vals)
             q += l + 1;
         }
     }
-    iz extra = 0;
-    for (iz i = 0; i < names.len; i++) {
-        extra += names[i].len + 1 + vals[i].len + 1;
+    for (iz i = 0; i < n; i++) {
+        total += wnlen[i] + 1 + wvlen[i] + 1;
     }
-    u8 *blk = allocbytes(a, total + extra + 2);
-    iz n = 0;
+
+    u16 *blk = alloc<u16>(a, total + 2);
+    iz m = 0;
     if (parent) {
-        char *q = parent;
+        u16 *q = parent;
         while (*q) {
             iz l = 0;
             while (q[l]) l++;
-            Str entry = {(u8 *)q, l};
             iz eq = 0;
-            while (eq < entry.len && entry.data[eq] != '=') eq++;
+            while (eq < l && q[eq] != '=') eq++;
             b32 skip = 0;
-            for (iz i = 0; i < names.len; i++) {
-                if (iequals(Str{entry.data, eq}, names[i])) {
+            for (iz i = 0; i < n; i++) {
+                if (w_iequals(q, eq, wname[i], wnlen[i])) {
                     skip = 1;
                     break;
                 }
             }
             if (!skip) {
-                copybytes(blk+n, entry.data, entry.len);
-                n += entry.len;
-                blk[n++] = 0;
+                for (iz j = 0; j <= l; j++) {
+                    blk[m++] = q[j];
+                }
             }
             q += l + 1;
         }
-        FreeEnvironmentStringsA(parent);
+        FreeEnvironmentStringsW(parent);
     }
-    for (iz i = 0; i < names.len; i++) {
-        copybytes(blk+n, names[i].data, names[i].len);
-        n += names[i].len;
-        blk[n++] = '=';
-        copybytes(blk+n, vals[i].data, vals[i].len);
-        n += vals[i].len;
-        blk[n++] = 0;
+    for (iz i = 0; i < n; i++) {
+        for (iz j = 0; j < wnlen[i]; j++) blk[m++] = wname[i][j];
+        blk[m++] = '=';
+        for (iz j = 0; j < wvlen[i]; j++) blk[m++] = wval[i][j];
+        blk[m++] = 0;
     }
-    blk[n++] = 0;
+    blk[m++] = 0;
     return blk;
 }
 
@@ -540,9 +623,9 @@ static b32 proc_spawn(Proc *p, Str shell, Str cmd,
     for (i32 i = 0; i < argc; i++) {
         append_arg(line, 4096 - 1, &linelen, argv[i]);
     }
-    line[linelen] = 0;
 
-    u8 *env = build_env(a, names, vals);
+    u16 *wline = utf8_to_wide_alloc(a, Str{line, linelen});
+    u16 *env   = build_env(a, names, vals);
 
     SecurityAttributes sa = {sizeof(sa), 0, 1};
     uz in_r = 0, in_w = 0, out_r = 0, out_w = 0, err_r = 0, err_w = 0;
@@ -563,7 +646,8 @@ static b32 proc_spawn(Proc *p, Str shell, Str cmd,
         si.hStdOutput = out_w;
         si.hStdError  = err_w;
         ProcessInfo pi = {};
-        ok = CreateProcessA(0, (char *)line, 0, 0, 1, CREATE_NO_WINDOW,
+        ok = CreateProcessW(0, wline, 0, 0, 1,
+                            CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT,
                             env, 0, &si, &pi);
         if (ok) {
             CloseHandle(pi.hThread);
@@ -783,29 +867,40 @@ static Str resolve_shell(Arena *a, Str shell)
             return shell;
         }
     }
-    char exe[260];
-    u32 n = GetModuleFileNameA(0, exe, sizeof(exe));
-    if (!n || n >= sizeof(exe)) {
+    u16 exe[260];
+    u32 n = GetModuleFileNameW(0, exe, (u32)countof(exe));
+    if (!n || n >= countof(exe)) {
         return shell;
     }
     iz d = n;
     while (d > 0 && exe[d-1] != '\\' && exe[d-1] != '/') {
         d--;
     }
-    char buf[512];
-    char const *suffix[3] = {"", "bin\\", "..\\bin\\"};
+    u16 wshell[260];
+    iz wlen = utf8_to_wide(wshell, countof(wshell)-1, shell);
+    if (!wlen && shell.len) {
+        return shell;
+    }
+    static u16 const suffix[3][9] = {
+        {},
+        {'b', 'i', 'n', '\\'},
+        {'.', '.', '\\', 'b', 'i', 'n', '\\'},
+    };
+    u16 buf[512];
     for (i32 k = 0; k < 3; k++) {
         iz len = 0;
-        for (iz i = 0; i < d && len < (iz)sizeof(buf)-1; i++) buf[len++] = exe[i];
-        for (char const *q = suffix[k]; *q && len < (iz)sizeof(buf)-1; q++) {
-            buf[len++] = *q;
+        for (iz i = 0; i < d && len < countof(buf)-1; i++) {
+            buf[len++] = exe[i];
         }
-        for (iz i = 0; i < shell.len && len < (iz)sizeof(buf)-1; i++) {
-            buf[len++] = (char)shell.data[i];
+        for (iz i = 0; suffix[k][i] && len < countof(buf)-1; i++) {
+            buf[len++] = suffix[k][i];
+        }
+        for (iz i = 0; i < wlen && len < countof(buf)-1; i++) {
+            buf[len++] = wshell[i];
         }
         buf[len] = 0;
-        if (GetFileAttributesA(buf) != (u32)INVALID_FILE_ATTRIBUTES) {
-            return clone(a, Str{(u8 *)buf, len});
+        if (GetFileAttributesW(buf) != (u32)INVALID_FILE_ATTRIBUTES) {
+            return wide_to_utf8(a, buf, len);
         }
     }
     return shell;
@@ -840,50 +935,32 @@ static void parse_args(Arena *a)
     config.hostkeyfile = "hostkey";
     config.shell       = "sh.exe";
 
-    char *cl = GetCommandLineA();
-    Str args[16];
     i32 n = 0;
-    char *p = cl;
-    while (*p && n < 16) {
-        while (*p==' ' || *p=='\t') {
-            p++;
-        }
-        if (!*p) {
-            break;
-        }
-        if (*p == '"') {
-            p++;
-            char *s = p;
-            while (*p && *p != '"') {
-                p++;
+    u16 **argv = CommandLineToArgvW(GetCommandLineW(), &n);
+    if (argv) {
+        for (i32 i = 1; i < n; i++) {
+            Str t = wide_to_utf8(a, argv[i], wstrlen(argv[i]));
+            if (t == "-p" && i+1 < n) {
+                i++;
+                Str v = wide_to_utf8(a, argv[i], wstrlen(argv[i]));
+                config.port = parse_int(v, 22);
+            } else if (t == "-k" && i+1 < n) {
+                i++;
+                config.keysfile = wide_to_utf8(a, argv[i], wstrlen(argv[i]));
+            } else if (t == "-s" && i+1 < n) {
+                i++;
+                config.shell = wide_to_utf8(a, argv[i], wstrlen(argv[i]));
+            } else if (t == "-H" && i+1 < n) {
+                i++;
+                config.hostkeyfile = wide_to_utf8(a, argv[i], wstrlen(argv[i]));
+            } else if (t == "-selftest") {
+                selftest_flag = 1;
+            } else if (t == "-h" || t == "-?" || t == "--help") {
+                usage();
+                ExitProcess(0);
             }
-            args[n++] = {(u8 *)s, (iz)(p-s)};
-            if (*p) p++;
-        } else {
-            char *s = p;
-            while (*p && *p!=' ' && *p!='\t') {
-                p++;
-            }
-            args[n++] = {(u8 *)s, (iz)(p-s)};
         }
-    }
-
-    for (i32 i = 1; i < n; i++) {
-        Str t = args[i];
-        if (t == "-p" && i+1 < n) {
-            config.port = parse_int(args[++i], 22);
-        } else if (t == "-k" && i+1 < n) {
-            config.keysfile = clone(a, args[++i]);
-        } else if (t == "-s" && i+1 < n) {
-            config.shell = clone(a, args[++i]);
-        } else if (t == "-H" && i+1 < n) {
-            config.hostkeyfile = clone(a, args[++i]);
-        } else if (t == "-selftest") {
-            selftest_flag = 1;
-        } else if (t == "-h" || t == "-?" || t == "--help") {
-            usage();
-            ExitProcess(0);
-        }
+        LocalFree((uz)argv);
     }
 }
 

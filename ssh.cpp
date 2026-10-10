@@ -21,6 +21,8 @@ static b32  sock_send(uz sock, u8 const *buf, iz len);
 static i32  sock_wait(uz sock, i32 ms);
 static void os_random(u8 *buf, iz len);
 static void os_log(Str s);
+static iz   utf8_to_wide(u16 *dst, iz cap, Str s);
+static Str  wide_to_utf8(Arena *a, u16 const *s, iz len);
 static b32  proc_spawn(Proc *p, Str shell, Str cmd,
                        Slice<Str> names, Slice<Str> vals, Arena *a);
 static iz   proc_pending(Proc *p, i32 which);
@@ -1442,6 +1444,19 @@ static i32 selftest(Arena *a)
         sig[0] ^= 1;
         report(a, "ed25519 reject", !ed25519_verify(sig, (u8 const *)"", 0, pub),
                &fails);
+    }
+
+    {
+        // UTF-8 -> UTF-16 -> UTF-8 round trip, including a surrogate pair.
+        Str src = "h\xc3\xa9" "llo \xf0\x9f\x98\x80";
+        u16 wide[32];
+        iz n = utf8_to_wide(wide, countof(wide), src);
+        Str back = wide_to_utf8(a, wide, n);
+        report(a, "utf8 roundtrip", back == src, &fails);
+
+        // Invalid UTF-8 becomes U+FFFD.
+        iz m = utf8_to_wide(wide, countof(wide), Str{"\xff"});
+        report(a, "utf8 invalid", m == 1 && wide[0] == 0xfffd, &fails);
     }
 
     return fails;

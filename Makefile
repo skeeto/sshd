@@ -1,7 +1,7 @@
 CXXFLAGS = -O2 -fno-exceptions -fno-rtti -fno-threadsafe-statics \
   -Wall -Wextra -Wconversion -Wno-sign-conversion
 
-LIBS = -lkernel32 -lws2_32 -ladvapi32 -lmemory -lchkstk
+LIBS = -lkernel32 -lws2_32 -ladvapi32 -lshell32 -lmemory -lchkstk
 SRC  = win32.cpp base.cpp crypto.cpp ssh.cpp
 
 AMALG_HEADER = \

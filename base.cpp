@@ -151,22 +151,7 @@ static Str clone(Arena *a, Str s)
     return r;
 }
 
-// Case-insensitive ASCII equality.
-static b32 iequals(Str a, Str b)
-{
-    if (a.len != b.len) {
-        return 0;
-    }
-    for (iz i = 0; i < a.len; i++) {
-        u8 x = a[i], y = b[i];
-        if (x>='A' && x<='Z') x += 32;
-        if (y>='A' && y<='Z') y += 32;
-        if (x != y) {
-            return 0;
-        }
-    }
-    return 1;
-}
+
 
 
 // Dynamic arrays
