@@ -32,11 +32,13 @@ enum : i32 {
     PROV_RSA_FULL              = 1,
     STARTF_USESTDHANDLES       = 0x100,
     STD_ERROR_HANDLE           = -12,
+    STD_INPUT_HANDLE           = -10,
     WAIT_OBJECT_0              = 0,
     AF_INET                    = 2,
     SOCK_STREAM                = 1,
     IPPROTO_TCP                = 6,
     SOL_SOCKET                 = 0xffff,
+    SO_KEEPALIVE               = 8,
     SO_REUSEADDR               = 4,
     TCP_NODELAY                = 1,
     WSAEWOULDBLOCK             = 10035,
@@ -113,6 +115,7 @@ W32(u32,    GetFileAttributesW(u16 const *));
 W32(u32,    GetFileSize(uz, u32 *));
 W32(u32,    GetLastError());
 W32(u32,    GetModuleFileNameW(uz, u16 *, u32));
+W32(b32,    GetConsoleMode(uz, u32 *));
 W32(uz,     GetStdHandle(i32));
 W32(void,   InitializeCriticalSection(void *));
 W32(void,   LeaveCriticalSection(void *));
@@ -120,6 +123,7 @@ W32(uz,     LocalFree(uz));
 W32(i32,    MultiByteToWideChar(u32, u32, char const *, i32, u16 *, i32));
 W32(b32,    PeekNamedPipe(uz, void *, u32, u32 *, u32 *, u32 *));
 W32(b32,    ReadFile(uz, void *, u32, u32 *, void *));
+W32(b32,    SetConsoleMode(uz, u32));
 W32(b32,    SetEvent(uz));
 W32(b32,    SetHandleInformation(uz, u32, u32));
 W32(void,   Sleep(u32));
@@ -417,7 +421,7 @@ static b32 sock_send(uz sock, u8 const *buf, iz len)
             wf.count = 1;
             wf.fd[0] = sock;
             Timeval tv;
-            tv.sec  = 10;
+            tv.sec  = IO_TIMEOUT_MS / 1000;
             tv.usec = 0;
             if (select(0, 0, &wf, 0, &tv) <= 0) {
                 return 0;
@@ -1116,6 +1120,17 @@ void mainCRTStartup()
         ExitProcess(selftest(&a) ? 1 : 0);
     }
 
+    // A QuickEdit selection in the console blocks writes to it, which
+    // would stall every thread at os_log while holding log_lock.
+    {
+        enum { QUICK_EDIT = 0x40, EXTENDED_FLAGS = 0x80 };
+        uz  in   = GetStdHandle(STD_INPUT_HANDLE);
+        u32 mode = 0;
+        if (GetConsoleMode(in, &mode)) {
+            SetConsoleMode(in, (mode & ~(u32)QUICK_EDIT) | EXTENDED_FLAGS);
+        }
+    }
+
     u8 wsa[512];
     WSAStartup(0x0202, wsa);
 
@@ -1145,6 +1160,7 @@ void mainCRTStartup()
         SetHandleInformation(s, HANDLE_FLAG_INHERIT, 0);
         i32 one = 1;
         setsockopt(s, IPPROTO_TCP, TCP_NODELAY, (char const *)&one, sizeof(one));
+        setsockopt(s, SOL_SOCKET, SO_KEEPALIVE, (char const *)&one, sizeof(one));
         u32 nonblock = 1;
         ioctlsocket(s, FIONBIO, &nonblock);
 

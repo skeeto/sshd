@@ -100,6 +100,9 @@ enum {
     CHAN_WINDOW = 2 << 20,
 };
 
+// Generous because the network sometimes stalls for most of a minute.
+enum { IO_TIMEOUT_MS = 120000 };
+
 static Str const ALG_HOSTKEY   = "ssh-ed25519";
 static Str const ALG_CIPHER    = "chacha20-poly1305@openssh.com";
 static Str const ALG_COMP      = "none";
@@ -400,7 +403,7 @@ static i32 read_packet(Conn *c, u8 **payload, iz *plen)
         if (a < 0) {
             return -1;
         }
-        if (a == 0 && !sock_wait(c->sock, 10000)) {
+        if (a == 0 && !sock_wait(c->sock, IO_TIMEOUT_MS)) {
             return -1;
         }
     }
@@ -421,7 +424,7 @@ static i32 read_byte(Conn *c, u8 *out)
         if (a < 0) {
             return -1;
         }
-        if (a == 0 && !sock_wait(c->sock, 10000)) {
+        if (a == 0 && !sock_wait(c->sock, IO_TIMEOUT_MS)) {
             return -1;
         }
     }
