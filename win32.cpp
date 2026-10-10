@@ -14,6 +14,7 @@ enum : i32 {
     CP_UTF8                    = 65001,
     CREATE_ALWAYS              = 2,
     CREATE_NO_WINDOW           = 0x08000000,
+    CREATE_SUSPENDED           = 0x00000004,
     CREATE_UNICODE_ENVIRONMENT = 0x00000400,
     CRYPT_VERIFYCONTEXT        = (i32)0xF0000000,
     FILE_ATTRIBUTE_NORMAL      = 0x80,
@@ -96,6 +97,7 @@ struct Timeval {
 };
 
 #define W32(r, p) extern "C" __declspec(dllimport) r __stdcall p noexcept
+W32(b32,    AssignProcessToJobObject(uz, uz));
 W32(b32,    CloseHandle(uz));
 W32(u16 **, CommandLineToArgvW(u16 const *, i32 *));
 W32(uz,     CreateFileW(u16 const *, u32, u32, void *, u32, u32, uz));
@@ -103,6 +105,7 @@ W32(b32,    CreatePipe(uz *, uz *, void *, u32));
 W32(b32,    CreateProcessW(u16 const *, u16 *, void *, void *, b32, u32,
                            void *, u16 const *, void *, void *));
 W32(uz,     CreateEventW(void *, b32, b32, u16 const *));
+W32(uz,     CreateJobObjectW(void *, u16 const *));
 W32(uz,     CreateThread(void *, uz, u32 (__stdcall *)(void *), void *, u32, u32 *));
 W32(void,   DeleteCriticalSection(void *));
 W32(void,   EnterCriticalSection(void *));
@@ -123,10 +126,12 @@ W32(void,   LeaveCriticalSection(void *));
 W32(uz,     LocalFree(uz));
 W32(b32,    PeekNamedPipe(uz, void *, u32, u32 *, u32 *, u32 *));
 W32(b32,    ReadFile(uz, void *, u32, u32 *, void *));
+W32(u32,    ResumeThread(uz));
 W32(b32,    SetConsoleMode(uz, u32));
 W32(b32,    SetEvent(uz));
 W32(b32,    SetHandleInformation(uz, u32, u32));
 W32(void,   Sleep(u32));
+W32(b32,    TerminateJobObject(uz, u32));
 W32(b32,    TerminateProcess(uz, u32));
 W32(byte *, VirtualAlloc(uz, uz, u32, u32));
 W32(b32,    VirtualFree(void *, uz, u32));
@@ -302,6 +307,7 @@ static b32 w_iequals(u16 const *a, iz alen, u16 const *b, iz blen)
 
 static CriticalSection log_lock;
 static CriticalSection spawn_lock;
+static i32             job_warned;
 static b32 selftest_flag;
 
 static void writeall(uz h, u8 const *data, iz len)
@@ -784,8 +790,11 @@ static b32 proc_spawn(Proc *p, Str shell, Str cmd,
         si.hStdOutput = out_w;
         si.hStdError  = err_w;
         ProcessInfo pi = {};
+        // Start suspended so the child joins the job before it can
+        // spawn anything of its own.
         ok = CreateProcessW(0, wline, 0, 0, 1,
-                            CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT,
+                            CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT |
+                            CREATE_SUSPENDED,
                             env, cwd, &si, &pi);
         StdinQueue *q = ok ? stdinq_start(in_w) : 0;
         if (ok && !q) {
@@ -795,7 +804,19 @@ static b32 proc_spawn(Proc *p, Str shell, Str cmd,
             ok = 0;
         }
         if (ok) {
+            // Fails if sshd itself runs in a job; then only the shell can
+            // be killed, as before.
+            uz job = CreateJobObjectW(0, 0);
+            if (job && !AssignProcessToJobObject(job, pi.hProcess)) {
+                CloseHandle(job);
+                job = 0;
+            }
+            if (!job && !__atomic_exchange_n(&job_warned, 1, __ATOMIC_RELAXED)) {
+                os_log("sshd: cannot use job objects, process trees will linger");
+            }
+            ResumeThread(pi.hThread);
             CloseHandle(pi.hThread);
+            p->hjob    = job;
             p->hproc   = pi.hProcess;
             p->stdinq  = q;
             p->hstdout = out_r;
@@ -898,11 +919,27 @@ static void proc_close_stdin(Proc *p)
     }
 }
 
+// Terminate the child and everything it started.
 static void proc_kill(Proc *p)
 {
-    if (p->hproc) {
+    if (p->hjob) {
+        TerminateJobObject(p->hjob, 1);
+    } else if (p->hproc) {
         TerminateProcess(p->hproc, 1);
     }
+    StdinQueue *q = p->stdinq;
+    if (q) {
+        EnterCriticalSection(&q->lock);
+        q->dead = 1;
+        LeaveCriticalSection(&q->lock);
+        SetEvent(q->event);
+    }
+}
+
+// Release the session's handles without killing anything, so background
+// jobs outlive a shell that exited normally.
+static void proc_close(Proc *p)
+{
     StdinQueue *q = p->stdinq;
     if (q) {
         EnterCriticalSection(&q->lock);
@@ -912,6 +949,11 @@ static void proc_kill(Proc *p)
         stdinq_release(q);
         p->stdinq = 0;
     }
+    if (p->hjob)    CloseHandle(p->hjob);
+    if (p->hproc)   CloseHandle(p->hproc);
+    if (p->hstdout) CloseHandle(p->hstdout);
+    if (p->hstderr) CloseHandle(p->hstderr);
+    *p = {};
 }
 
 
@@ -980,10 +1022,10 @@ static u32 __stdcall conn_thread(void *param)
         closesocket(c->sock);
     }
     if (c->child_started) {
-        proc_kill(&c->proc);
-        if (c->proc.hproc)   CloseHandle(c->proc.hproc);
-        if (c->proc.hstdout) CloseHandle(c->proc.hstdout);
-        if (c->proc.hstderr) CloseHandle(c->proc.hstderr);
+        if (proc_alive(&c->proc)) {
+            proc_kill(&c->proc);  // client went away mid-command
+        }
+        proc_close(&c->proc);
     }
     pool_put(c);
     return 0;

@@ -7,6 +7,7 @@ struct StdinQueue;
 
 struct Proc {
     uz  hproc   = {};
+    uz  hjob    = {};  // whole process tree, killed on abnormal end
     StdinQueue *stdinq = {};  // drained to the child by a writer thread
     uz  hstdout = {};
     uz  hstderr = {};
