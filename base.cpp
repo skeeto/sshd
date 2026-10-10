@@ -61,11 +61,6 @@ static void copybytes(void *dst, void const *src, iz len)
     if (len) __builtin_memcpy(dst, src, (uz)len);
 }
 
-static void zerobytes(void *dst, iz len)
-{
-    if (len) __builtin_memset(dst, 0, (uz)len);
-}
-
 
 // Strings
 
@@ -108,41 +103,6 @@ static Str cstr(char const *s)
         n++;
     }
     return {(u8 *)s, n};
-}
-
-static Str takehead(Str s, iz n)
-{
-    assert(n >= 0 && n <= s.len);
-    s.len = n;
-    return s;
-}
-
-static Str cuthead(Str s, iz n)
-{
-    assert(n >= 0 && n <= s.len);
-    s.data += n;
-    s.len  -= n;
-    return s;
-}
-
-static Str taketail(Str s, iz n)
-{
-    return cuthead(s, s.len-n);
-}
-
-static Str cuttail(Str s, iz n)
-{
-    return takehead(s, s.len-n);
-}
-
-static b32 startswith(Str s, Str prefix)
-{
-    return s.len>=prefix.len && takehead(s, prefix.len)==prefix;
-}
-
-static b32 endswith(Str s, Str suffix)
-{
-    return s.len>=suffix.len && taketail(s, suffix.len)==suffix;
 }
 
 static Str trimleft(Str s)
@@ -280,12 +240,6 @@ static void print(Buf *b, Str s)
     b->len += s.len;
 }
 
-static void putbyte(Buf *b, u8 c)
-{
-    reserve(b, 1);
-    b->data[b->len++] = c;
-}
-
 static void print(Buf *b, i64 v)
 {
     u8  tmp[32];
@@ -299,13 +253,6 @@ static void print(Buf *b, i64 v)
         *--beg = '-';
     }
     print(b, span(beg, end));
-}
-
-static void printhex(Buf *b, u64 v, i32 digits)
-{
-    for (i32 i = digits-1; i >= 0; i--) {
-        putbyte(b, "0123456789abcdef"[v>>(4*i) & 15]);
-    }
 }
 
 static Str finish(Buf *b)

@@ -271,20 +271,6 @@ struct Conn {
 };
 
 
-// Logging
-
-static void logmsg(char const *tag, Conn *c)
-{
-    Buf b = Buf(&c->arena, 256);
-    print(&b, cstr(tag));
-    if (c->vc.len) {
-        print(&b, " from ");
-        print(&b, c->vc);
-    }
-    os_log(finish(&b));
-}
-
-
 // Packet I/O
 
 static b32 send_packet(Conn *c, u8 const *payload, iz len)
