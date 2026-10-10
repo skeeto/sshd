@@ -5,18 +5,15 @@ LIBS = -lkernel32 -lws2_32 -ladvapi32 -lmemory -lchkstk
 SRC  = win32.cpp base.cpp crypto.cpp ssh.cpp
 
 AMALG_HEADER = \
-  '// sshd - a minimal public-key-only SSH server for Windows.' \
-  '// Amalgamation of base.cpp, crypto.cpp, ssh.cpp, and win32.cpp.' \
+  '// sshd - a minimal public-key-only SSH server for Windows' \
+  '// $$ cc -nostartfiles -o sshd.exe sshd.cpp -lws2_32' \
   '// This is free and unencumbered software released into the public domain.' \
-  '//' \
-  '// Build (32-bit Windows XP):' \
-  '//   cc -nostartfiles -o sshd.exe sshd.cpp -lkernel32 -lws2_32 -ladvapi32' \
-  '// Build (64-bit): use x86_64-w64-mingw32-g++ and -o sshd64.exe.'
+  ''
 
 all: sshd.exe
 
 sshd.exe: $(SRC)
-	$(CXX) -std=c++20 -nostdlib $(CXXFLAGS) -o $@ win32.cpp $(LIBS)
+	$(CXX) -nostdlib $(CXXFLAGS) -o $@ win32.cpp $(LIBS)
 
 # Single-file amalgamation to copy to the target machine and build there.
 sshd.cpp: base.cpp crypto.cpp ssh.cpp win32.cpp Makefile
