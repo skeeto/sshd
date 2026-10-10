@@ -46,6 +46,7 @@ struct Config {
     Str keysfile;
     Str hostkeyfile;
     Str shell;
+    Str home;  // sessions start here; base for relative SFTP paths
     u8  hostseed[32];
     u8  hostpub[32];
 };

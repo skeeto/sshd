@@ -109,6 +109,7 @@ W32(void,   EnterCriticalSection(void *));
 W32(void,   ExitProcess[[noreturn]](u32));
 W32(b32,    FreeEnvironmentStringsW(u16 *));
 W32(u16 *,  GetCommandLineW());
+W32(u32,    GetEnvironmentVariableW(u16 const *, u16 *, u32));
 W32(u16 *,  GetEnvironmentStringsW());
 W32(b32,    GetExitCodeProcess(uz, u32 *));
 W32(u32,    GetFileAttributesW(u16 const *));
@@ -762,6 +763,7 @@ static b32 proc_spawn(Proc *p, Str shell, Str cmd,
 
     u16 *wline = utf8_to_wide_alloc(a, Str{line, linelen});
     u16 *env   = build_env(a, names, vals);
+    u16 *cwd   = config.home.len ? utf8_to_wide_alloc(a, config.home) : 0;
 
     SecurityAttributes sa = {sizeof(sa), 0, 1};
     uz in_r = 0, in_w = 0, out_r = 0, out_w = 0, err_r = 0, err_w = 0;
@@ -784,7 +786,7 @@ static b32 proc_spawn(Proc *p, Str shell, Str cmd,
         ProcessInfo pi = {};
         ok = CreateProcessW(0, wline, 0, 0, 1,
                             CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT,
-                            env, 0, &si, &pi);
+                            env, cwd, &si, &pi);
         StdinQueue *q = ok ? stdinq_start(in_w) : 0;
         if (ok && !q) {
             TerminateProcess(pi.hProcess, 1);
@@ -1172,6 +1174,14 @@ void mainCRTStartup()
     ed25519_init();
     load_hostkey(&a);
     config.shell = resolve_shell(&a, config.shell);
+    {
+        u16 home[260];
+        u32 n = GetEnvironmentVariableW((u16 const *)u"USERPROFILE", home,
+                                        (u32)countof(home));
+        if (n && n < countof(home)) {
+            config.home = wide_to_utf8(&a, home, n);
+        }
+    }
 
     uz listener = make_listener(config.port);
     if (listener == INVALID_SOCKET) {
