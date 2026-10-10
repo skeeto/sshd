@@ -1472,9 +1472,20 @@ static i32 selftest(Arena *a)
         Str back = wide_to_utf8(a, wide, n);
         report(a, "utf8 roundtrip", back == src, &fails);
 
-        // Invalid UTF-8 becomes U+FFFD.
+        // Invalid UTF-8 becomes U+FFFD, one per offending byte.
         iz m = utf8_to_wide(wide, countof(wide), Str{"\xff"});
         report(a, "utf8 invalid", m == 1 && wide[0] == 0xfffd, &fails);
+
+        // Overlong, surrogate, truncated, and out-of-range forms.
+        Str bad = "a\xc0\xaf" "b\xed\xa0\x80" "c\xf4\x90\x80\x80" "d\xe2\x82";
+        m = utf8_to_wide(wide, countof(wide), bad);
+        u16 want[] = {'a', 0xfffd, 0xfffd, 'b', 0xfffd, 0xfffd, 0xfffd,
+                      'c', 0xfffd, 0xfffd, 0xfffd, 0xfffd, 'd', 0xfffd, 0xfffd};
+        b32 same = m == countof(want);
+        for (iz i = 0; same && i < m; i++) {
+            same = wide[i] == want[i];
+        }
+        report(a, "utf8 malformed", same, &fails);
     }
 
     return fails;

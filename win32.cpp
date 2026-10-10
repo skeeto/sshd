@@ -120,7 +120,6 @@ W32(uz,     GetStdHandle(i32));
 W32(void,   InitializeCriticalSection(void *));
 W32(void,   LeaveCriticalSection(void *));
 W32(uz,     LocalFree(uz));
-W32(i32,    MultiByteToWideChar(u32, u32, char const *, i32, u16 *, i32));
 W32(b32,    PeekNamedPipe(uz, void *, u32, u32 *, u32 *, u32 *));
 W32(b32,    ReadFile(uz, void *, u32, u32 *, void *));
 W32(b32,    SetConsoleMode(uz, u32));
@@ -207,11 +206,47 @@ extern "C" uz strlen(char const *s)
 
 // UTF-8 <-> UTF-16 conversion. Invalid UTF-8 becomes U+FFFD.
 
+// Decode UTF-8 to UTF-16, or only count units when dst is null. Each
+// invalid byte becomes U+FFFD, which MultiByteToWideChar does not do on
+// XP. Returns 0 if the result does not fit in cap.
 static iz utf8_to_wide(u16 *dst, iz cap, Str s)
 {
-    i32 n = MultiByteToWideChar(CP_UTF8, 0, (char const *)s.data, (i32)s.len,
-                                dst, (i32)cap);
-    return n > 0 ? (iz)n : 0;
+    static u32 const min[] = {0, 0x80, 0x800, 0x10000};
+    iz n = 0;
+    for (iz i = 0; i < s.len;) {
+        u32 cp  = 0xfffd;
+        iz  len = 1;
+        u8  b   = s.data[i];
+        if (b < 0x80) {
+            cp = b;
+        } else if (b>=0xc0 && b<0xf5) {
+            i32 need = b>=0xf0 ? 3 : b>=0xe0 ? 2 : 1;
+            u32 v    = b & (0x3fu >> need);
+            iz  j    = 1;
+            for (; j<=need && i+j<s.len && (s.data[i+j]&0xc0)==0x80; j++) {
+                v = v<<6 | (s.data[i+j] & 0x3f);
+            }
+            if (j>need && v>=min[need] && v<=0x10ffff && (v<0xd800 || v>0xdfff)) {
+                cp  = v;
+                len = j;
+            }
+        }
+        i += len;
+
+        if (cp >= 0x10000) {
+            if (dst && n+2<=cap) {
+                dst[n+0] = (u16)(0xd7c0 + (cp >> 10));
+                dst[n+1] = (u16)(0xdc00 | (cp & 0x3ff));
+            }
+            n += 2;
+        } else {
+            if (dst && n<cap) {
+                dst[n] = (u16)cp;
+            }
+            n += 1;
+        }
+    }
+    return dst && n>cap ? 0 : n;
 }
 
 static iz utf8_count16(Str s)
