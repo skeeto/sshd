@@ -1,13 +1,7 @@
-CXX32 = i686-w64-mingw32-g++
-CXX64 = x86_64-w64-mingw32-g++
+CXXFLAGS = -O2 -fno-exceptions -fno-rtti -fno-threadsafe-statics \
+  -Wall -Wextra -Wconversion -Wno-sign-conversion -Wno-unused-function
 
-CXXFLAGS = -std=c++20 -O2 -nostartfiles -static-libgcc \
-  -fno-exceptions -fno-rtti -fno-threadsafe-statics \
-  -fno-asynchronous-unwind-tables -fno-stack-protector \
-  -Wall -Wextra -Wconversion -Wno-sign-conversion \
-  -Wno-unused-parameter -Wno-unused-function
-
-LIBS = -lkernel32 -lws2_32 -ladvapi32
+LIBS = -lkernel32 -lws2_32 -ladvapi32 -lmemory -lchkstk
 SRC  = win32.cpp base.cpp crypto.cpp ssh.cpp
 
 AMALG_HEADER = \
@@ -16,16 +10,13 @@ AMALG_HEADER = \
   '// This is free and unencumbered software released into the public domain.' \
   '//' \
   '// Build (32-bit Windows XP):' \
-  '//   i686-w64-mingw32-g++ -std=c++20 -O2 -nostartfiles -static-libgcc -fno-exceptions -fno-rtti -fno-threadsafe-statics -fno-asynchronous-unwind-tables -fno-stack-protector -o sshd.exe sshd.cpp -lkernel32 -lws2_32 -ladvapi32' \
+  '//   cc -nostartfiles -o sshd.exe sshd.cpp -lkernel32 -lws2_32 -ladvapi32' \
   '// Build (64-bit): use x86_64-w64-mingw32-g++ and -o sshd64.exe.'
 
-all: sshd.exe sshd64.exe
+all: sshd.exe
 
 sshd.exe: $(SRC)
-	$(CXX32) $(CXXFLAGS) -o $@ win32.cpp $(LIBS)
-
-sshd64.exe: $(SRC)
-	$(CXX64) $(CXXFLAGS) -o $@ win32.cpp $(LIBS)
+	$(CXX) -std=c++20 -nostdlib $(CXXFLAGS) -o $@ win32.cpp $(LIBS)
 
 # Single-file amalgamation to copy to the target machine and build there.
 sshd.cpp: base.cpp crypto.cpp ssh.cpp win32.cpp Makefile
@@ -39,4 +30,4 @@ sshd.cpp: base.cpp crypto.cpp ssh.cpp win32.cpp Makefile
 	@grep -vE '^#include "(base|crypto|ssh)\.cpp"$$' win32.cpp >> $@
 
 clean:
-	rm -f sshd.exe sshd64.exe sshd.cpp
+	rm -f sshd.exe sshd.cpp

@@ -3,7 +3,7 @@
 // This is free and unencumbered software released into the public domain.
 //
 // Build (32-bit Windows XP):
-//   i686-w64-mingw32-g++ -std=c++20 -O2 -nostartfiles -static-libgcc -fno-exceptions -fno-rtti -fno-threadsafe-statics -fno-asynchronous-unwind-tables -fno-stack-protector -o sshd.exe sshd.cpp -lkernel32 -lws2_32 -ladvapi32
+//   cc -nostartfiles -o sshd.exe sshd.cpp -lkernel32 -lws2_32 -ladvapi32
 // Build (64-bit): use x86_64-w64-mingw32-g++ and -o sshd64.exe.
 // Foundation: types, arenas, strings, buffers, slices, base64
 // This is free and unencumbered software released into the public domain.
