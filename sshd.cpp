@@ -315,6 +315,7 @@ static Str b64encode(Arena *a, u8 const *data, iz len)
     }
     return {out, n};
 }
+
 // Crypto: SHA-256, SHA-512, ChaCha20, Poly1305, X25519, Ed25519
 // This is free and unencumbered software released into the public domain.
 
@@ -1392,6 +1393,7 @@ static b32 ed25519_verify(u8 const *sig, u8 const *msg, iz len, u8 const *pub)
     ge_pack(check, p);
     return ct_eq(check, sig, 32);
 }
+
 // SSH protocol: transport, key exchange, authentication, channels
 // This is free and unencumbered software released into the public domain.
 
