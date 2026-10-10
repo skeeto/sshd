@@ -2000,9 +2000,10 @@ static void derive_key(u8 *out, iz need, Str K, u8 const *h,
     }
 }
 
-static b32 do_kex(Conn *c, Arena *a, b32 initial, Str ic_in)
+// Run one key exchange, initial or a rekey started by the peer's KEXINIT
+// (ic_in). Nothing allocated in scratch outlives the exchange.
+static b32 do_kex(Conn *c, Arena scratch, b32 initial, Str ic_in)
 {
-    Arena scratch = *a;
     b32   ok      = 0;
     Str   ic = {}, is = {};
     u8   *pl = 0;
@@ -2017,6 +2018,7 @@ static b32 do_kex(Conn *c, Arena *a, b32 initial, Str ic_in)
     u8    sig[64], sigblob[96];
     Str   sigstr = {};
     u8    sid[32];
+    u8    ksend[64], krecv[64];
 
     is = build_kexinit(&scratch, initial);
     if (!send_packet(c, is.data, is.len)) {
@@ -2181,8 +2183,10 @@ static b32 do_kex(Conn *c, Arena *a, b32 initial, Str ic_in)
     }
     copybytes(sid, c->session_id, 32);
 
-    derive_key(c->ksend, 64, Kstr, h, 'D', sid);
-    derive_key(c->krecv, 64, Kstr, h, 'C', sid);
+    // On a rekey both NEWKEYS messages travel under the old keys, so each
+    // new key is installed only after its direction's NEWKEYS.
+    derive_key(ksend, 64, Kstr, h, 'D', sid);
+    derive_key(krecv, 64, Kstr, h, 'C', sid);
 
     {
         u8 nk = MSG_NEWKEYS;
@@ -2190,6 +2194,7 @@ static b32 do_kex(Conn *c, Arena *a, b32 initial, Str ic_in)
             goto done;
         }
     }
+    copybytes(c->ksend, ksend, 64);
     c->send_enc = 1;
     if (c->strict) {
         c->seqsend = 0;
@@ -2208,6 +2213,7 @@ static b32 do_kex(Conn *c, Arena *a, b32 initial, Str ic_in)
         }
         goto done;
     }
+    copybytes(c->krecv, krecv, 64);
     c->recv_enc = 1;
     if (c->strict) {
         c->seqrecv = 0;
@@ -2219,7 +2225,6 @@ static b32 do_kex(Conn *c, Arena *a, b32 initial, Str ic_in)
     ok = 1;
 
 done:
-    *a = scratch;
     return ok;
 }
 
@@ -2620,7 +2625,7 @@ static b32 handle_msg(Conn *c, u8 const *pl, iz plen)
     case MSG_EXT_INFO:
         return 1;
     case MSG_KEXINIT:
-        return do_kex(c, &c->arena, 0, Str{(u8 *)pl, plen});
+        return do_kex(c, c->arena, 0, Str{(u8 *)pl, plen});
 
     case MSG_GLOBAL_REQUEST: {
         rstr(&r);
@@ -2819,7 +2824,7 @@ static void conn_run(Conn *c)
         os_log("sshd: version exchange failed");
         return;
     }
-    if (!do_kex(c, &c->arena, 1, Str{})) {
+    if (!do_kex(c, c->arena, 1, Str{})) {
         os_log("sshd: kex failed");
         return;
     }
