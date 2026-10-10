@@ -39,6 +39,76 @@ static void proc_close_stdin(Proc *p);
 static b32  os_readfile(Arena *a, Str path, Str *out);
 static b32  os_writefile(Str path, u8 const *data, iz len);
 
+// File system, for SFTP. Paths are canonical and absolute ("C:/a/b").
+// Errors are reported as SFTP status codes.
+
+enum {
+    FS_OK     = 0,
+    FS_EOF    = 1,
+    FS_NOENT  = 2,
+    FS_ACCESS = 3,
+    FS_FAIL   = 4,
+};
+
+enum {  // os_fopen flags, numerically the same as SFTP's
+    FS_READ   = 0x01,
+    FS_WRITE  = 0x02,
+    FS_APPEND = 0x04,
+    FS_CREAT  = 0x08,
+    FS_TRUNC  = 0x10,
+    FS_EXCL   = 0x20,
+};
+
+enum {  // SetAttrs fields, numerically the same as SFTP's
+    FS_SIZE = 0x01,
+    FS_PERM = 0x04,
+    FS_TIME = 0x08,
+};
+
+struct FileInfo {
+    i64 size;
+    i64 atime;  // Unix seconds
+    i64 mtime;
+    b32 dir;
+    b32 readonly;
+    i32 err;
+};
+
+struct SetAttrs {
+    u32 flags;
+    i64 size;
+    u32 perm;
+    i64 atime;
+    i64 mtime;
+};
+
+struct OsFile {
+    uz  h;
+    i32 err;
+};
+
+struct DirEnt {
+    Str      name;
+    FileInfo info;
+    i32      err;  // FS_EOF after the last entry
+};
+
+static OsFile   os_fopen(Arena scratch, Str path, i32 flags);
+static i32      os_fread(uz h, i64 off, u8 *buf, i32 len);  // 0 at EOF, or -status
+static i32      os_fwrite(uz h, i64 off, u8 const *buf, i32 len);  // off<0 appends
+static void     os_fclose(uz h);
+static FileInfo os_stat(Arena scratch, Str path);
+static FileInfo os_fstat(uz h);
+static i32      os_setattrs(Arena scratch, Str path, uz h, SetAttrs a);  // via h if open
+static DirEnt   os_dirnext(Arena *a, Str path, uz *find);  // *find starts at 0
+static void     os_dirclose(uz find);
+static i32      os_mkdir(Arena scratch, Str path);
+static i32      os_rmdir(Arena scratch, Str path);
+static i32      os_remove(Arena scratch, Str path);
+static i32      os_rename(Arena scratch, Str from, Str to, b32 replace);
+static u8      *os_bigalloc(iz size);  // zeroed, null on failure
+static void     os_bigfree(u8 *p);
+
 
 // Configuration
 
@@ -274,7 +344,9 @@ struct Conn {
 
     Proc proc;
     b32  child_started;
-    b32  sent_exit, sent_eof, sent_close, got_close;
+    b32  sent_exit, sent_eof, sent_close, got_close, got_eof;
+
+    struct Sftp *sftp;  // subsystem in place of a child process
 
     Slice<Str> envname, envval;
 
@@ -924,7 +996,7 @@ static b32 auth_phase(Conn *c)
             c->arena = scratch;
         }
         if (good) {
-            c->user = user;
+            c->user = clone(&c->arena, user);
             u8 ok = MSG_USERAUTH_SUCCESS;
             return send_packet(c, &ok, 1);
         }
@@ -1040,10 +1112,15 @@ static b32 pump_output(Conn *c)
     return sent;
 }
 
-static b32 finish_child(Conn *c)
-{
-    u32 status = proc_status(&c->proc);
+// SFTP subsystem (sftp.cpp)
+static b32  sftp_start(Conn *c);
+static void sftp_input(Conn *c, Str data);
+static b32  sftp_pump(Conn *c);
+static void sftp_free(Conn *c);
 
+// Report the exit status, then end the channel.
+static b32 finish_channel(Conn *c, u32 status)
+{
     u8  buf[64];
     Wr  w = {buf, 0, sizeof(buf), 0};
     w8(&w, MSG_CHANNEL_REQUEST);
@@ -1106,6 +1183,16 @@ static b32 handle_request(Conn *c, Rd *r)
     if (req == "exec") {
         Str cmd = rstr(r);
         b32 ok = !r->err && start_child(c, cmd);
+        return want ? channel_reply(c, ok ? MSG_CHANNEL_SUCCESS
+                                          : MSG_CHANNEL_FAILURE) : 1;
+    }
+    if (req == "subsystem") {
+        Str name = rstr(r);
+        b32 ok   = !r->err && name=="sftp" && !c->child_started && !c->sftp;
+        if (ok) {
+            os_log("sshd: subsystem sftp");
+            ok = sftp_start(c);
+        }
         return want ? channel_reply(c, ok ? MSG_CHANNEL_SUCCESS
                                           : MSG_CHANNEL_FAILURE) : 1;
     }
@@ -1205,7 +1292,9 @@ static b32 handle_msg(Conn *c, u8 const *pl, iz plen)
                 data.len = c->win_local;
             }
             c->win_local -= (u32)data.len;
-            if (!c->child_started ||
+            if (c->sftp) {
+                sftp_input(c, data);
+            } else if (!c->child_started ||
                     !proc_write(&c->proc, data.data, data.len)) {
                 c->win_credit += (u32)data.len;  // discarded
             }
@@ -1231,6 +1320,7 @@ static b32 handle_msg(Conn *c, u8 const *pl, iz plen)
 
     case MSG_CHANNEL_EOF: {
         r32(&r);
+        c->got_eof = 1;
         if (c->child_started) {
             proc_close_stdin(&c->proc);
         }
@@ -1296,6 +1386,12 @@ static void session_phase(Conn *c)
             }
         }
         b32 busy = 0;
+        if (c->sftp) {
+            busy = sftp_pump(c);
+            if (!c->sent_close && !adjust_window(c)) {
+                return;
+            }
+        }
         if (c->child_started) {
             busy = pump_output(c);
             if (!c->sent_close && !adjust_window(c)) {
@@ -1304,7 +1400,7 @@ static void session_phase(Conn *c)
             if (!proc_alive(&c->proc) && !c->sent_exit) {
                 if (proc_pending(&c->proc, 0) <= 0 &&
                         proc_pending(&c->proc, 1) <= 0) {
-                    finish_child(c);
+                    finish_channel(c, proc_status(&c->proc));
                 }
             }
         }

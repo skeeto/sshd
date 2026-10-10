@@ -9,16 +9,24 @@
 #include "base.cpp"
 #include "crypto.cpp"
 #include "ssh.cpp"
+#include "sftp.cpp"
 
 enum : i32 {
     CP_UTF8                    = 65001,
     CREATE_ALWAYS              = 2,
+    CREATE_NEW                 = 1,
     CREATE_NO_WINDOW           = 0x08000000,
     CREATE_SUSPENDED           = 0x00000004,
     CREATE_UNICODE_ENVIRONMENT = 0x00000400,
     CRYPT_VERIFYCONTEXT        = (i32)0xF0000000,
+    FILE_ATTRIBUTE_DIRECTORY   = 0x10,
     FILE_ATTRIBUTE_NORMAL      = 0x80,
+    FILE_ATTRIBUTE_READONLY    = 0x01,
+    FILE_FLAG_BACKUP_SEMANTICS = 0x02000000,
+    FILE_SHARE_DELETE          = 4,
     FILE_SHARE_READ            = 1,
+    FILE_SHARE_WRITE           = 2,
+    FILE_WRITE_ATTRIBUTES      = 0x100,
     FIONBIO                    = (i32)0x8004667e,
     GENERIC_READ               = (i32)0x80000000,
     GENERIC_WRITE              = 0x40000000,
@@ -28,7 +36,11 @@ enum : i32 {
     MEM_COMMIT                 = 0x1000,
     MEM_RELEASE                = 0x8000,
     MEM_RESERVE                = 0x2000,
+    MOVEFILE_COPY_ALLOWED      = 2,
+    MOVEFILE_REPLACE_EXISTING  = 1,
+    OPEN_ALWAYS                = 4,
     OPEN_EXISTING              = 3,
+    TRUNCATE_EXISTING          = 5,
     PAGE_READWRITE             = 4,
     PROV_RSA_FULL              = 1,
     STARTF_USESTDHANDLES       = 0x100,
@@ -86,6 +98,37 @@ struct SockaddrIn {
     u8  zero[8];
 };
 
+struct FileTime {  // FILETIME
+    u32 lo, hi;
+};
+
+struct FindData {  // WIN32_FIND_DATAW
+    u32      attrs;
+    FileTime ctime, atime, mtime;
+    u32      sizehi, sizelo;
+    u32      reserved0, reserved1;
+    u16      name[260];
+    u16      altname[14];
+};
+
+struct AttrData {  // WIN32_FILE_ATTRIBUTE_DATA
+    u32      attrs;
+    FileTime ctime, atime, mtime;
+    u32      sizehi, sizelo;
+};
+
+struct HandleInfo {  // BY_HANDLE_FILE_INFORMATION
+    u32      attrs;
+    FileTime ctime, atime, mtime;
+    u32      serial, sizehi, sizelo, nlinks, indexhi, indexlo;
+};
+
+struct Overlapped {  // OVERLAPPED
+    uz  internal, internalhigh;
+    u32 offlo, offhi;
+    uz  event;
+};
+
 struct FdSet {  // Windows fd_set
     u32 count;
     uz  fd[64];
@@ -100,6 +143,19 @@ struct Timeval {
 W32(b32,    AssignProcessToJobObject(uz, uz));
 W32(b32,    CloseHandle(uz));
 W32(u16 **, CommandLineToArgvW(u16 const *, i32 *));
+W32(b32,    CreateDirectoryW(u16 const *, void *));
+W32(b32,    DeleteFileW(u16 const *));
+W32(b32,    FindClose(uz));
+W32(uz,     FindFirstFileW(u16 const *, FindData *));
+W32(b32,    FindNextFileW(uz, FindData *));
+W32(b32,    GetFileAttributesExW(u16 const *, i32, AttrData *));
+W32(b32,    GetFileInformationByHandle(uz, HandleInfo *));
+W32(b32,    MoveFileExW(u16 const *, u16 const *, u32));
+W32(b32,    RemoveDirectoryW(u16 const *));
+W32(b32,    SetEndOfFile(uz));
+W32(b32,    SetFileAttributesW(u16 const *, u32));
+W32(u32,    SetFilePointer(uz, i32, i32 *, u32));
+W32(b32,    SetFileTime(uz, FileTime const *, FileTime const *, FileTime const *));
 W32(uz,     CreateFileW(u16 const *, u32, u32, void *, u32, u32, uz));
 W32(b32,    CreatePipe(uz *, uz *, void *, u32));
 W32(b32,    CreateProcessW(u16 const *, u16 *, void *, void *, b32, u32,
@@ -957,6 +1013,272 @@ static void proc_close(Proc *p)
 }
 
 
+// File system
+
+// Canonical "C:/a/b", plus an optional suffix, to a "\\?\" wide path.
+static u16 *fspath(Arena *a, Str path, Str suffix = {})
+{
+    iz   cap = 4 + path.len + suffix.len + 1;
+    u16 *w   = alloc<u16>(a, cap);
+    w[0] = '\\'; w[1] = '\\'; w[2] = '?'; w[3] = '\\';
+    iz n = 4;
+    n += utf8_to_wide(w+n, cap-1-n, path);
+    n += utf8_to_wide(w+n, cap-1-n, suffix);
+    for (iz i = 4; i < n; i++) {
+        if (w[i] == '/') w[i] = '\\';
+    }
+    w[n] = 0;
+    return w;
+}
+
+static i32 fserr(void)
+{
+    switch (GetLastError()) {
+    case   2:  // ERROR_FILE_NOT_FOUND
+    case   3:  // ERROR_PATH_NOT_FOUND
+    case  15:  // ERROR_INVALID_DRIVE
+    case 123:  // ERROR_INVALID_NAME
+    case 161:  // ERROR_BAD_PATHNAME
+        return FS_NOENT;
+    case   5:  // ERROR_ACCESS_DENIED
+    case  32:  // ERROR_SHARING_VIOLATION
+    case  33:  // ERROR_LOCK_VIOLATION
+        return FS_ACCESS;
+    case  18:  // ERROR_NO_MORE_FILES
+    case  38:  // ERROR_HANDLE_EOF
+        return FS_EOF;
+    }
+    return FS_FAIL;
+}
+
+static i64 unixtime(FileTime ft)
+{
+    i64 t = (i64)((u64)ft.hi<<32 | ft.lo);
+    return t/10000000 - 11644473600;
+}
+
+static FileTime filetime(i64 t)
+{
+    u64 v = (u64)(t + 11644473600) * 10000000;
+    FileTime ft = {(u32)v, (u32)(v >> 32)};
+    return ft;
+}
+
+static FileInfo fileinfo(u32 attrs, FileTime at, FileTime mt, u32 hi, u32 lo)
+{
+    FileInfo fi = {};
+    fi.size     = (i64)((u64)hi<<32 | lo);
+    fi.atime    = unixtime(at);
+    fi.mtime    = unixtime(mt);
+    fi.dir      = (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0;
+    fi.readonly = (attrs & FILE_ATTRIBUTE_READONLY) != 0;
+    return fi;
+}
+
+static OsFile os_fopen(Arena scratch, Str path, i32 flags)
+{
+    OsFile r = {};
+    u32 access = 0;
+    if (flags & FS_READ) {
+        access |= (u32)GENERIC_READ;
+    }
+    if (flags & (FS_WRITE|FS_APPEND)) {
+        access |= GENERIC_WRITE;
+    }
+    u32 disp = 0;
+    if (flags & FS_CREAT) {
+        disp = flags&FS_EXCL  ? CREATE_NEW :
+               flags&FS_TRUNC ? CREATE_ALWAYS : OPEN_ALWAYS;
+    } else {
+        disp = flags&FS_TRUNC ? TRUNCATE_EXISTING : OPEN_EXISTING;
+    }
+    u32 share = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
+    uz  h     = CreateFileW(fspath(&scratch, path), access, share, 0, disp,
+                            FILE_ATTRIBUTE_NORMAL, 0);
+    if (h == INVALID_HANDLE_VALUE) {
+        r.err = fserr();
+        return r;
+    }
+    r.h = h;
+    return r;
+}
+
+static i32 os_fread(uz h, i64 off, u8 *buf, i32 len)
+{
+    Overlapped ov = {};
+    ov.offlo = (u32)off;
+    ov.offhi = (u32)(off >> 32);
+    u32 got = 0;
+    if (!ReadFile(h, buf, (u32)len, &got, &ov)) {
+        i32 err = fserr();
+        return err==FS_EOF ? 0 : -err;
+    }
+    return (i32)got;
+}
+
+static i32 os_fwrite(uz h, i64 off, u8 const *buf, i32 len)
+{
+    for (i32 done = 0; done < len;) {
+        Overlapped ov = {};
+        ov.offlo = off<0 ? 0xffffffff : (u32)(off + done);
+        ov.offhi = off<0 ? 0xffffffff : (u32)((off + done) >> 32);
+        u32 wrote = 0;
+        if (!WriteFile(h, buf+done, (u32)(len-done), &wrote, &ov) || !wrote) {
+            return fserr();
+        }
+        done += (i32)wrote;
+    }
+    return FS_OK;
+}
+
+static void os_fclose(uz h)
+{
+    CloseHandle(h);
+}
+
+static FileInfo os_stat(Arena scratch, Str path)
+{
+    AttrData ad = {};
+    if (!GetFileAttributesExW(fspath(&scratch, path), 0, &ad)) {
+        FileInfo fi = {};
+        fi.err = fserr();
+        return fi;
+    }
+    return fileinfo(ad.attrs, ad.atime, ad.mtime, ad.sizehi, ad.sizelo);
+}
+
+static FileInfo os_fstat(uz h)
+{
+    HandleInfo hi = {};
+    if (!GetFileInformationByHandle(h, &hi)) {
+        FileInfo fi = {};
+        fi.err = fserr();
+        return fi;
+    }
+    return fileinfo(hi.attrs, hi.atime, hi.mtime, hi.sizehi, hi.sizelo);
+}
+
+static i32 os_setattrs(Arena scratch, Str path, uz h, SetAttrs a)
+{
+    u16 *w = fspath(&scratch, path);
+    if (a.flags & (FS_SIZE|FS_TIME)) {
+        uz f = h;
+        if (!f) {
+            u32 access = FILE_WRITE_ATTRIBUTES;
+            if (a.flags & FS_SIZE) {
+                access |= GENERIC_WRITE;
+            }
+            u32 share = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
+            f = CreateFileW(w, access, share, 0, OPEN_EXISTING,
+                            FILE_FLAG_BACKUP_SEMANTICS, 0);
+            if (f == INVALID_HANDLE_VALUE) {
+                return fserr();
+            }
+        }
+        i32 err = FS_OK;
+        if (a.flags & FS_SIZE) {
+            i32 hi = (i32)(a.size >> 32);
+            SetFilePointer(f, (i32)a.size, &hi, 0);
+            if (!SetEndOfFile(f)) {
+                err = fserr();
+            }
+        }
+        if (!err && (a.flags & FS_TIME)) {
+            FileTime at = filetime(a.atime);
+            FileTime mt = filetime(a.mtime);
+            if (!SetFileTime(f, 0, &at, &mt)) {
+                err = fserr();
+            }
+        }
+        if (!h) {
+            CloseHandle(f);
+        }
+        if (err) {
+            return err;
+        }
+    }
+
+    // Only the owner write bit maps onto Windows, as the read-only flag.
+    if (a.flags & FS_PERM) {
+        u32 attrs = GetFileAttributesW(w);
+        if (attrs == (u32)INVALID_FILE_ATTRIBUTES) {
+            return fserr();
+        }
+        if (!(attrs & FILE_ATTRIBUTE_DIRECTORY)) {
+            u32 want = a.perm&0200 ? attrs & ~(u32)FILE_ATTRIBUTE_READONLY
+                                   : attrs | FILE_ATTRIBUTE_READONLY;
+            if (want!=attrs && !SetFileAttributesW(w, want)) {
+                return fserr();
+            }
+        }
+    }
+    return FS_OK;
+}
+
+static DirEnt os_dirnext(Arena *a, Str path, uz *find)
+{
+    DirEnt   r  = {};
+    FindData fd = {};
+    if (!*find) {
+        Str  suffix = path.data[path.len-1]=='/' ? Str{"*"} : Str{"/*"};
+        uz   h      = FindFirstFileW(fspath(a, path, suffix), &fd);
+        if (h == INVALID_HANDLE_VALUE) {
+            r.err = GetLastError()==2 ? FS_EOF : fserr();  // 2: empty root
+            return r;
+        }
+        *find = h;
+    } else if (!FindNextFileW(*find, &fd)) {
+        r.err = fserr();
+        return r;
+    }
+    r.name = wide_to_utf8(a, fd.name, wstrlen(fd.name));
+    r.info = fileinfo(fd.attrs, fd.atime, fd.mtime, fd.sizehi, fd.sizelo);
+    return r;
+}
+
+static void os_dirclose(uz find)
+{
+    FindClose(find);
+}
+
+static i32 os_mkdir(Arena scratch, Str path)
+{
+    return CreateDirectoryW(fspath(&scratch, path), 0) ? FS_OK : fserr();
+}
+
+static i32 os_rmdir(Arena scratch, Str path)
+{
+    return RemoveDirectoryW(fspath(&scratch, path)) ? FS_OK : fserr();
+}
+
+static i32 os_remove(Arena scratch, Str path)
+{
+    return DeleteFileW(fspath(&scratch, path)) ? FS_OK : fserr();
+}
+
+static i32 os_rename(Arena scratch, Str from, Str to, b32 replace)
+{
+    u32 flags = MOVEFILE_COPY_ALLOWED;
+    if (replace) {
+        flags |= MOVEFILE_REPLACE_EXISTING;
+    }
+    u16 *a = fspath(&scratch, from);
+    u16 *b = fspath(&scratch, to);
+    return MoveFileExW(a, b, flags) ? FS_OK : fserr();
+}
+
+static u8 *os_bigalloc(iz size)
+{
+    return (u8 *)VirtualAlloc(0, (uz)size, MEM_COMMIT|MEM_RESERVE,
+                              PAGE_READWRITE);
+}
+
+static void os_bigfree(u8 *p)
+{
+    VirtualFree(p, 0, MEM_RELEASE);
+}
+
+
 // Connection pool: freelist of fixed regions.
 
 enum { BLOCKSIZE = 1<<20, MAXCONNS = 32 };
@@ -1027,6 +1349,7 @@ static u32 __stdcall conn_thread(void *param)
         }
         proc_close(&c->proc);
     }
+    sftp_free(c);
     pool_put(c);
     return 0;
 }
