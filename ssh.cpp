@@ -3,9 +3,11 @@
 
 // Platform interface (implemented in win32.cpp)
 
+struct StdinQueue;
+
 struct Proc {
     uz  hproc   = {};
-    uz  hstdin  = {};
+    StdinQueue *stdinq = {};  // drained to the child by a writer thread
     uz  hstdout = {};
     uz  hstderr = {};
     b32 running = {};
@@ -27,7 +29,8 @@ static b32  proc_spawn(Proc *p, Str shell, Str cmd,
                        Slice<Str> names, Slice<Str> vals, Arena *a);
 static iz   proc_pending(Proc *p, i32 which);
 static iz   proc_read(Proc *p, u8 *buf, iz len, i32 which);
-static b32  proc_write(Proc *p, u8 const *buf, iz len);
+static b32  proc_write(Proc *p, u8 const *buf, iz len);  // queues, never blocks
+static u32  proc_drained(Proc *p);  // bytes delivered since last call
 static b32  proc_alive(Proc *p);
 static u32  proc_status(Proc *p);
 static void proc_kill(Proc *p);
@@ -261,6 +264,7 @@ struct Conn {
     b32 chan_open;
     u32 chan_local, chan_remote;
     u32 win_remote, win_local, win_local_max, pkt_remote;
+    u32 win_credit;  // consumed bytes not yet returned to the peer
     b32 got_pty;
 
     Proc proc;
@@ -961,16 +965,22 @@ static b32 start_child(Conn *c, Str cmd)
     return 1;
 }
 
+// Return window only for bytes the child has actually consumed, so that
+// queued stdin never exceeds CHAN_WINDOW.
 static b32 adjust_window(Conn *c)
 {
-    if (c->win_local < c->win_local_max / 2) {
-        u32 add = c->win_local_max - c->win_local;
+    if (c->child_started) {
+        c->win_credit += proc_drained(&c->proc);
+    }
+    if (c->win_credit && c->win_local < c->win_local_max / 2) {
+        u32 add = c->win_credit;
         u8  buf[16];
         Wr  w = {buf, 0, sizeof(buf), 0};
         w8(&w, MSG_CHANNEL_WINDOW_ADJUST);
         w32(&w, c->chan_remote);
         w32(&w, add);
-        c->win_local = c->win_local_max;
+        c->win_local += add;
+        c->win_credit = 0;
         return send_packet(c, buf, w.len);
     }
     return 1;
@@ -1185,8 +1195,9 @@ static b32 handle_msg(Conn *c, u8 const *pl, iz plen)
                 data.len = c->win_local;
             }
             c->win_local -= (u32)data.len;
-            if (c->child_started) {
-                proc_write(&c->proc, data.data, data.len);
+            if (!c->child_started ||
+                    !proc_write(&c->proc, data.data, data.len)) {
+                c->win_credit += (u32)data.len;  // discarded
             }
             return adjust_window(c);
         }
@@ -1202,6 +1213,7 @@ static b32 handle_msg(Conn *c, u8 const *pl, iz plen)
                 data.len = c->win_local;
             }
             c->win_local -= (u32)data.len;
+            c->win_credit += (u32)data.len;
             return adjust_window(c);
         }
         return 1;
@@ -1275,6 +1287,9 @@ static void session_phase(Conn *c)
         }
         if (c->child_started) {
             pump_output(c);
+            if (!c->sent_close && !adjust_window(c)) {
+                return;
+            }
             if (!proc_alive(&c->proc) && !c->sent_exit) {
                 if (proc_pending(&c->proc, 0) <= 0 &&
                         proc_pending(&c->proc, 1) <= 0) {

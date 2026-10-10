@@ -23,7 +23,9 @@ enum : i32 {
     GENERIC_WRITE              = 0x40000000,
     HANDLE_FLAG_INHERIT        = 1,
     INVALID_FILE_ATTRIBUTES    = -1,
+    INFINITE                   = -1,
     MEM_COMMIT                 = 0x1000,
+    MEM_RELEASE                = 0x8000,
     MEM_RESERVE                = 0x2000,
     OPEN_EXISTING              = 3,
     PAGE_READWRITE             = 4,
@@ -98,6 +100,7 @@ W32(uz,     CreateFileW(u16 const *, u32, u32, void *, u32, u32, uz));
 W32(b32,    CreatePipe(uz *, uz *, void *, u32));
 W32(b32,    CreateProcessW(u16 const *, u16 *, void *, void *, b32, u32,
                            void *, u16 const *, void *, void *));
+W32(uz,     CreateEventW(void *, b32, b32, u16 const *));
 W32(uz,     CreateThread(void *, uz, u32 (__stdcall *)(void *), void *, u32, u32 *));
 W32(void,   DeleteCriticalSection(void *));
 W32(void,   EnterCriticalSection(void *));
@@ -117,10 +120,12 @@ W32(uz,     LocalFree(uz));
 W32(i32,    MultiByteToWideChar(u32, u32, char const *, i32, u16 *, i32));
 W32(b32,    PeekNamedPipe(uz, void *, u32, u32 *, u32 *, u32 *));
 W32(b32,    ReadFile(uz, void *, u32, u32 *, void *));
+W32(b32,    SetEvent(uz));
 W32(b32,    SetHandleInformation(uz, u32, u32));
 W32(void,   Sleep(u32));
 W32(b32,    TerminateProcess(uz, u32));
 W32(byte *, VirtualAlloc(uz, uz, u32, u32));
+W32(b32,    VirtualFree(void *, uz, u32));
 W32(u32,    WaitForSingleObject(uz, u32));
 W32(i32,    WideCharToMultiByte(u32, u32, u16 const *, i32, char *, i32,
                                 char const *, b32 *));
@@ -593,6 +598,98 @@ static u16 *build_env(Arena *a, Slice<Str> names, Slice<Str> vals)
     return blk;
 }
 
+// Child stdin is fed from a ring buffer by a dedicated writer thread so
+// the connection thread never blocks on a full pipe, which would deadlock
+// against a child blocked writing its own full stdout. The SSH layer only
+// returns window for drained bytes, so the ring never holds more than
+// CHAN_WINDOW. The queue is shared by reference count because the writer
+// may stay blocked in WriteFile after the connection ends (e.g. an orphaned
+// grandchild holding the pipe open), and XP has no CancelSynchronousIo.
+struct StdinQueue {
+    CriticalSection lock;
+    uz  event;    // auto-reset: data, eof, or stop
+    uz  pipe;     // write end, owned by the writer thread
+    u8 *buf;
+    u32 head;     // total bytes queued
+    u32 tail;     // total bytes written or discarded
+    u32 drained;  // bytes written or discarded since last proc_drained()
+    b32 eof;      // close the pipe once drained
+    b32 dead;     // stop writing, discard everything
+    i32 refs;
+};
+
+enum : u32 { STDINQ_CAP = CHAN_WINDOW };  // power of two
+static_assert(!(STDINQ_CAP & (STDINQ_CAP-1)), "");
+
+static void stdinq_release(StdinQueue *q)
+{
+    if (!__atomic_sub_fetch(&q->refs, 1, __ATOMIC_ACQ_REL)) {
+        CloseHandle(q->event);
+        DeleteCriticalSection(&q->lock);
+        VirtualFree(q, 0, MEM_RELEASE);
+    }
+}
+
+static u32 __stdcall stdinq_writer(void *arg)
+{
+    StdinQueue *q = (StdinQueue *)arg;
+    for (;;) {
+        EnterCriticalSection(&q->lock);
+        u32 len  = q->head - q->tail;
+        u32 off  = q->tail & (STDINQ_CAP - 1);
+        b32 done = q->dead || (!len && q->eof);
+        LeaveCriticalSection(&q->lock);
+        if (done) {
+            break;
+        }
+        if (!len) {
+            WaitForSingleObject(q->event, (u32)INFINITE);
+            continue;
+        }
+
+        len = len < STDINQ_CAP-off ? len : STDINQ_CAP-off;
+        u32 wrote = 0;
+        b32 ok = WriteFile(q->pipe, q->buf+off, len, &wrote, 0) && wrote;
+
+        EnterCriticalSection(&q->lock);
+        if (!ok) {
+            q->dead = 1;  // child stopped reading
+            wrote = q->head - q->tail;
+        }
+        q->tail    += wrote;
+        q->drained += wrote;
+        LeaveCriticalSection(&q->lock);
+    }
+    CloseHandle(q->pipe);
+    stdinq_release(q);
+    return 0;
+}
+
+static StdinQueue *stdinq_start(uz pipe)
+{
+    byte *mem = VirtualAlloc(0, sizeof(StdinQueue) + STDINQ_CAP,
+                             MEM_COMMIT|MEM_RESERVE, PAGE_READWRITE);
+    if (!mem) {
+        return 0;
+    }
+    StdinQueue *q = new (mem) StdinQueue();
+    q->buf   = (u8 *)mem + sizeof(StdinQueue);
+    q->pipe  = pipe;
+    q->refs  = 2;
+    q->event = CreateEventW(0, 0, 0, 0);
+    InitializeCriticalSection(&q->lock);
+    u32 tid = 0;
+    uz  th  = q->event ? CreateThread(0, 0, stdinq_writer, q, 0, &tid) : 0;
+    if (!th) {
+        if (q->event) CloseHandle(q->event);
+        DeleteCriticalSection(&q->lock);
+        VirtualFree(mem, 0, MEM_RELEASE);
+        return 0;
+    }
+    CloseHandle(th);
+    return q;
+}
+
 static b32 proc_spawn(Proc *p, Str shell, Str cmd,
                       Slice<Str> names, Slice<Str> vals, Arena *a)
 {
@@ -649,10 +746,17 @@ static b32 proc_spawn(Proc *p, Str shell, Str cmd,
         ok = CreateProcessW(0, wline, 0, 0, 1,
                             CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT,
                             env, 0, &si, &pi);
+        StdinQueue *q = ok ? stdinq_start(in_w) : 0;
+        if (ok && !q) {
+            TerminateProcess(pi.hProcess, 1);
+            CloseHandle(pi.hProcess);
+            CloseHandle(pi.hThread);
+            ok = 0;
+        }
         if (ok) {
             CloseHandle(pi.hThread);
             p->hproc   = pi.hProcess;
-            p->hstdin  = in_w;
+            p->stdinq  = q;
             p->hstdout = out_r;
             p->hstderr = err_r;
             p->running = 1;
@@ -697,19 +801,37 @@ static iz proc_read(Proc *p, u8 *buf, iz len, i32 which)
 
 static b32 proc_write(Proc *p, u8 const *buf, iz len)
 {
-    if (!p->hstdin) {
+    StdinQueue *q = p->stdinq;
+    if (!q) {
         return 0;
     }
-    iz off = 0;
-    while (off < len) {
-        u32 wrote = 0;
-        i32 cap = len-off > (1<<20) ? (1<<20) : (i32)(len-off);
-        if (!WriteFile(p->hstdin, buf+off, cap, &wrote, 0) || !wrote) {
-            return 0;
-        }
-        off += wrote;
+    b32 ok = 1;
+    EnterCriticalSection(&q->lock);
+    if (q->dead || q->eof || (u32)len > STDINQ_CAP - (q->head - q->tail)) {
+        ok = 0;  // discarded: caller returns the window itself
+    } else {
+        u32 off   = q->head & (STDINQ_CAP - 1);
+        u32 first = (u32)len < STDINQ_CAP-off ? (u32)len : STDINQ_CAP-off;
+        copybytes(q->buf+off, buf, first);
+        copybytes(q->buf, buf+first, len-first);
+        q->head += (u32)len;
     }
-    return 1;
+    LeaveCriticalSection(&q->lock);
+    SetEvent(q->event);
+    return ok;
+}
+
+static u32 proc_drained(Proc *p)
+{
+    StdinQueue *q = p->stdinq;
+    if (!q) {
+        return 0;
+    }
+    EnterCriticalSection(&q->lock);
+    u32 n = q->drained;
+    q->drained = 0;
+    LeaveCriticalSection(&q->lock);
+    return n;
 }
 
 static b32 proc_alive(Proc *p)
@@ -726,9 +848,12 @@ static u32 proc_status(Proc *p)
 
 static void proc_close_stdin(Proc *p)
 {
-    if (p->hstdin) {
-        CloseHandle(p->hstdin);
-        p->hstdin = 0;
+    StdinQueue *q = p->stdinq;
+    if (q) {
+        EnterCriticalSection(&q->lock);
+        q->eof = 1;
+        LeaveCriticalSection(&q->lock);
+        SetEvent(q->event);
     }
 }
 
@@ -737,7 +862,15 @@ static void proc_kill(Proc *p)
     if (p->hproc) {
         TerminateProcess(p->hproc, 1);
     }
-    proc_close_stdin(p);
+    StdinQueue *q = p->stdinq;
+    if (q) {
+        EnterCriticalSection(&q->lock);
+        q->dead = 1;
+        LeaveCriticalSection(&q->lock);
+        SetEvent(q->event);
+        stdinq_release(q);
+        p->stdinq = 0;
+    }
 }
 
 
@@ -810,7 +943,6 @@ static u32 __stdcall conn_thread(void *param)
         if (c->proc.hproc)   CloseHandle(c->proc.hproc);
         if (c->proc.hstdout) CloseHandle(c->proc.hstdout);
         if (c->proc.hstderr) CloseHandle(c->proc.hstderr);
-        if (c->proc.hstdin)  CloseHandle(c->proc.hstdin);
     }
     pool_put(c);
     return 0;
@@ -825,6 +957,7 @@ static uz make_listener(i32 port)
     if (s == INVALID_SOCKET) {
         return s;
     }
+    SetHandleInformation(s, HANDLE_FLAG_INHERIT, 0);
     i32 one = 1;
     setsockopt(s, SOL_SOCKET, SO_REUSEADDR, (char const *)&one, sizeof(one));
 
@@ -1007,6 +1140,9 @@ void mainCRTStartup()
         if (s == INVALID_SOCKET) {
             continue;
         }
+        // Sockets are inheritable by default, and children would otherwise
+        // inherit every connection's socket, including the listener.
+        SetHandleInformation(s, HANDLE_FLAG_INHERIT, 0);
         i32 one = 1;
         setsockopt(s, IPPROTO_TCP, TCP_NODELAY, (char const *)&one, sizeof(one));
         u32 nonblock = 1;
