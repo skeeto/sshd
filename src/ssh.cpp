@@ -26,7 +26,7 @@ static void os_random(u8 *buf, iz len);
 static void os_log(Str s);
 static iz   utf8_to_wide(u16 *dst, iz cap, Str s);
 static Str  wide_to_utf8(Arena *a, u16 const *s, iz len);
-static b32  proc_spawn(Proc *p, Str shell, Str cmd,
+static b32  proc_spawn(Proc *p, Str shell, Str cmd, b32 interactive,
                        Slice<Str> names, Slice<Str> vals, Arena *a);
 static iz   proc_pending(Proc *p, i32 which);
 static iz   proc_read(Proc *p, u8 *buf, iz len, i32 which);
@@ -36,6 +36,8 @@ static b32  proc_alive(Proc *p);
 static u32  proc_status(Proc *p);
 static void proc_kill(Proc *p);
 static void proc_close_stdin(Proc *p);
+static iz   proc_list(Proc *p, u32 *pids, iz cap);  // job's processes, -1 if unknown
+static iz   proc_killexcept(Proc *p, u32 const *keep, iz nkeep);  // returns count
 static b32  os_readfile(Arena *a, Str path, Str *out);
 static b32  os_writefile(Str path, u8 const *data, iz len);
 
@@ -341,6 +343,14 @@ struct Conn {
     u32 win_remote, win_local, win_local_max, pkt_remote;
     u32 win_credit;  // consumed bytes not yet returned to the peer
     b32 got_pty;
+
+    // Line editing for pty sessions, done here since Windows has no ptys
+    u8  edline[1024];
+    iz  edlen;
+    i32 edesc;        // escape sequence state
+    b32 edcr;         // previous byte was CR
+    u32 fgkeep[64];   // job's processes when the last line was entered
+    iz  nfgkeep;      // -1 if unknown
 
     Proc proc;
     b32  child_started;
@@ -1038,12 +1048,13 @@ static b32 start_child(Conn *c, Str cmd)
         }
         os_log(finish(&b));
     }
-    if (!proc_spawn(&c->proc, c->cfg->shell, cmd, c->envname, c->envval,
-                    &c->arena)) {
+    if (!proc_spawn(&c->proc, c->cfg->shell, cmd, c->got_pty, c->envname,
+                    c->envval, &c->arena)) {
         os_log("sshd: spawn failed");
         return 0;
     }
     c->child_started = 1;
+    c->nfgkeep       = -1;  // no line entered yet
     return 1;
 }
 
@@ -1095,10 +1106,14 @@ static b32 pump_output(Conn *c)
             if (avail <= 0) {
                 break;
             }
-            iz cap = 16384;
+            iz lim = c->win_remote;
+            if (c->pkt_remote && c->pkt_remote < (u32)lim) lim = c->pkt_remote;
+            if (c->got_pty) {
+                lim /= 2;  // room to expand LF to CRLF
+            }
+            iz cap = c->got_pty ? 16384/2 : 16384;
             if (avail < cap) cap = avail;
-            if (c->win_remote < (u32)cap) cap = c->win_remote;
-            if (c->pkt_remote && c->pkt_remote < (u32)cap) cap = c->pkt_remote;
+            if (lim < cap) cap = lim;
             if (cap <= 0) {
                 break;
             }
@@ -1107,14 +1122,136 @@ static b32 pump_output(Conn *c)
             if (got <= 0) {
                 break;
             }
-            if (!send_channel_data(c, buf, got, which)) {
+            u8 *out = buf;
+            iz  len = got;
+            u8  crlf[16384];
+            if (c->got_pty) {  // the client's terminal is raw
+                len = 0;
+                for (iz i = 0; i < got; i++) {
+                    if (buf[i] == '\n') crlf[len++] = '\r';
+                    crlf[len++] = buf[i];
+                }
+                out = crlf;
+            }
+            if (!send_channel_data(c, out, len, which)) {
                 return sent;
             }
-            c->win_remote -= (u32)got;
+            c->win_remote -= (u32)len;
             sent = 1;
         }
     }
     return sent;
+}
+
+// Line editing for pty sessions. The client's terminal is raw, so a
+// minimal cooked mode runs here: echo, erase, kill, and complete lines
+// to the child, which only ever sees a pipe.
+
+struct Echo {
+    u8 buf[2048];
+    iz len;
+};
+
+static void echoflush(Conn *c, Echo *e)
+{
+    // Echo is small, so rather than queue it, drop it if the window is shut
+    if (e->len && c->win_remote>=(u32)e->len &&
+            send_channel_data(c, e->buf, e->len, 0)) {
+        c->win_remote -= (u32)e->len;
+    }
+    e->len = 0;
+}
+
+static void echo(Conn *c, Echo *e, Str s)
+{
+    if (s.len > countof(e->buf)-e->len) {
+        echoflush(c, e);
+    }
+    copybytes(e->buf+e->len, s.data, s.len);
+    e->len += s.len;
+}
+
+static void editerase(Conn *c, Echo *e)
+{
+    if (c->edlen) {
+        for (; c->edlen>1 && (c->edline[c->edlen-1]&0xc0)==0x80; c->edlen--) {}
+        c->edlen--;
+        echo(c, e, "\b \b");
+    }
+}
+
+// Interrupt the foreground by killing every process started since the
+// last line was entered. With nothing to kill, an empty line makes the
+// shell print a fresh prompt.
+static void editinterrupt(Conn *c)
+{
+    iz n = c->nfgkeep>=0 ? proc_killexcept(&c->proc, c->fgkeep, c->nfgkeep) : 0;
+    if (!n) {
+        proc_write(&c->proc, (u8 const *)"\n", 1);
+    }
+}
+
+static void editinput(Conn *c, Str data)
+{
+    Echo e = {};
+    for (iz i = 0; i < data.len; i++) {
+        u8  b  = data.data[i];
+        b32 cr = c->edcr;
+        c->edcr = b == '\r';
+
+        // Swallow escape sequences, such as arrow keys
+        if (c->edesc == 1) {
+            c->edesc = b=='[' || b=='O' ? 2 : 0;
+            continue;
+        } else if (c->edesc == 2) {
+            c->edesc = b>=0x40 && b<=0x7e ? 0 : 2;
+            continue;
+        }
+
+        switch (b) {
+        case 0x1b:
+            c->edesc = 1;
+            break;
+        case '\n':
+            if (cr) break;  // CR LF
+            [[fallthrough]];
+        case '\r':
+            echo(c, &e, "\r\n");
+            c->edline[c->edlen++] = '\n';
+            c->nfgkeep = proc_list(&c->proc, c->fgkeep, countof(c->fgkeep));
+            proc_write(&c->proc, c->edline, c->edlen);
+            c->edlen = 0;
+            break;
+        case 0x08:  // ^H
+        case 0x7f:  // DEL
+            editerase(c, &e);
+            break;
+        case 0x15:  // ^U
+            while (c->edlen) editerase(c, &e);
+            break;
+        case 0x17:  // ^W
+            while (c->edlen && c->edline[c->edlen-1]==' ') editerase(c, &e);
+            while (c->edlen && c->edline[c->edlen-1]!=' ') editerase(c, &e);
+            break;
+        case 0x03:  // ^C
+            echo(c, &e, "^C\r\n");
+            echoflush(c, &e);
+            c->edlen = 0;
+            editinterrupt(c);
+            break;
+        case 0x04:  // ^D at the start of a line ends input
+            if (!c->edlen) {
+                proc_close_stdin(&c->proc);
+            }
+            break;
+        default:
+            if ((b>=0x20 || b=='\t') && c->edlen<countof(c->edline)-1) {
+                c->edline[c->edlen++] = b;
+                echo(c, &e, Str{&b, 1});
+            }
+        }
+    }
+    echoflush(c, &e);
 }
 
 // SFTP subsystem (sftp.cpp)
@@ -1299,6 +1436,9 @@ static b32 handle_msg(Conn *c, u8 const *pl, iz plen)
             c->win_local -= (u32)data.len;
             if (c->sftp) {
                 sftp_input(c, data);
+            } else if (c->got_pty && c->child_started) {
+                editinput(c, data);
+                c->win_credit += (u32)data.len;
             } else if (!c->child_started ||
                     !proc_write(&c->proc, data.data, data.len)) {
                 c->win_credit += (u32)data.len;  // discarded

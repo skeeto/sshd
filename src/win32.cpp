@@ -181,6 +181,8 @@ W32(void,   InitializeCriticalSection(void *));
 W32(void,   LeaveCriticalSection(void *));
 W32(uz,     LocalFree(uz));
 W32(b32,    PeekNamedPipe(uz, void *, u32, u32 *, u32 *, u32 *));
+W32(uz,     OpenProcess(u32, b32, u32));
+W32(b32,    QueryInformationJobObject(uz, i32, void *, u32, u32 *));
 W32(b32,    ReadFile(uz, void *, u32, u32 *, void *));
 W32(u32,    ResumeThread(uz));
 W32(b32,    SetConsoleMode(uz, u32));
@@ -792,7 +794,7 @@ static StdinQueue *stdinq_start(uz pipe)
     return q;
 }
 
-static b32 proc_spawn(Proc *p, Str shell, Str cmd,
+static b32 proc_spawn(Proc *p, Str shell, Str cmd, b32 interactive,
                       Slice<Str> names, Slice<Str> vals, Arena *a)
 {
     b32 pwsh = is_powershell(shell);
@@ -815,6 +817,8 @@ static b32 proc_spawn(Proc *p, Str shell, Str cmd,
         argv[argc++] = "-NoProfile";
         argv[argc++] = "-Command";
         argv[argc++] = "-";
+    } else if (interactive) {
+        argv[argc++] = "-i";  // prompts, though stdin is a pipe
     }
 
     u8 *line = allocbytes(a, 4096);
@@ -990,6 +994,47 @@ static void proc_kill(Proc *p)
         LeaveCriticalSection(&q->lock);
         SetEvent(q->event);
     }
+}
+
+static iz proc_list(Proc *p, u32 *pids, iz cap)
+{
+    struct {  // JOBOBJECT_BASIC_PROCESS_ID_LIST
+        u32 assigned;
+        u32 listed;
+        uz  ids[64];
+    } info = {};
+    enum { JobObjectBasicProcessIdList = 3 };
+    if (!p->hjob || !QueryInformationJobObject(p->hjob,
+            JobObjectBasicProcessIdList, &info, sizeof(info), 0)) {
+        return -1;  // includes more than 64 processes
+    }
+    if ((iz)info.listed > cap) {
+        return -1;
+    }
+    for (u32 i = 0; i < info.listed; i++) {
+        pids[i] = (u32)info.ids[i];
+    }
+    return (iz)info.listed;
+}
+
+static iz proc_killexcept(Proc *p, u32 const *keep, iz nkeep)
+{
+    enum { PROCESS_TERMINATE = 1 };
+    u32 pids[64];
+    iz  n      = proc_list(p, pids, countof(pids));
+    iz  killed = 0;
+    for (iz i = 0; i < n; i++) {
+        b32 kept = 0;
+        for (iz j = 0; j<nkeep && !kept; j++) {
+            kept = pids[i] == keep[j];
+        }
+        uz h = kept ? 0 : OpenProcess(PROCESS_TERMINATE, 0, pids[i]);
+        if (h) {
+            killed += TerminateProcess(h, 130) != 0;  // like SIGINT
+            CloseHandle(h);
+        }
+    }
+    return killed;
 }
 
 // Release the session's handles without killing anything, so background

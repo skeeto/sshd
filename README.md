@@ -17,8 +17,9 @@ w64devkit shell, and is not a general-purpose replacement for OpenSSH.
 * Key exchange `curve25519-sha256`, host key `ssh-ed25519`, cipher
   `chacha20-poly1305@openssh.com`, with OpenSSH strict key exchange
   (the Terrapin countermeasure) and rekeying
-* Remote commands and a non-interactive shell, with separate stdout and
-  stderr, stdin, and exit status (no pty)
+* Remote commands with separate stdout and stderr, stdin, and exit status
+* Interactive shells with basic line editing, though not a real terminal
+  (see [Interactive sessions](#interactive-sessions))
 * A built-in `sftp` subsystem, so `scp` and `sftp` work
 * Sessions start in the user's home directory (`%USERPROFILE%`)
 * A client that disconnects mid-command takes the whole process tree
@@ -66,6 +67,25 @@ lines are honored. Lines with options (`from=`, `command=`,
 The Windows Firewall may block the first time `sshd.exe` listens. The
 exception it grants applies to that executable path, so a binary at a
 new path needs a new exception.
+
+## Interactive sessions
+
+Windows XP has no pseudo-terminals, so when a client requests a pty (as
+plain `ssh host` does), the server provides a minimal line editor and
+runs the shell interactively (`sh -i`) on pipes:
+
+* Typed characters are echoed, and Enter sends the line to the shell.
+* Backspace erases a character, Ctrl-U the line, and Ctrl-W a word.
+* Ctrl-C interrupts the running command by terminating the processes
+  started since the last line was entered. Its exit status is 130.
+  Background jobs started earlier are left alone.
+* Ctrl-D at the start of a line ends input, which exits the shell.
+
+There is no history, cursor movement, or tab completion, and escape
+sequences such as arrow keys are ignored. Programs see pipes, not a
+terminal, so full-screen programs like `vi` and `less` do not work, and
+programs that buffer output when it is not a terminal may appear to
+hang. The window size is not passed through.
 
 ## Security
 
