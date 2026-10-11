@@ -3,3 +3,4 @@ sshd64.exe
 hostkey
 authorized_keys
 docs/RFC-all/
+/sshd.cpp

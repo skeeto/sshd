@@ -32,10 +32,10 @@ With [w64devkit][]:
 
     $ make
 
-This builds `sshd.exe` from the sources in `src/`. The top-level
-`sshd.cpp` is a generated single-file amalgamation of the same sources
-(`make sshd.cpp`). Copy it to a target machine and build it there with a
-single command:
+This builds `sshd.exe` from the sources in `src/`. To build on another
+machine without the repository, generate a single-file amalgamation of
+the same sources with `make sshd.cpp`, copy it over, and build it there
+with a single command:
 
     $ cc -nostartfiles -o sshd.exe sshd.cpp -lws2_32
 
