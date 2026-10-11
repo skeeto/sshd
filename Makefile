@@ -2,7 +2,7 @@ CXXFLAGS = -O2 -fno-exceptions -fno-rtti -fno-threadsafe-statics \
   -Wall -Wextra -Wconversion -Wno-sign-conversion
 
 LIBS = -lkernel32 -lws2_32 -ladvapi32 -lshell32 -lmemory -lchkstk -lgcc
-SRC  = win32.cpp base.cpp crypto.cpp ssh.cpp sftp.cpp
+SRC  = src/win32.cpp src/base.cpp src/crypto.cpp src/ssh.cpp src/sftp.cpp
 
 AMALG_HEADER = \
   '// sshd - a minimal public-key-only SSH server for Windows' \
@@ -13,20 +13,20 @@ AMALG_HEADER = \
 all: sshd.exe
 
 sshd.exe: $(SRC)
-	$(CXX) -nostdlib $(CXXFLAGS) -o $@ win32.cpp $(LIBS)
+	$(CXX) -nostdlib $(CXXFLAGS) -o $@ src/win32.cpp $(LIBS)
 
 # Single-file amalgamation to copy to the target machine and build there.
-sshd.cpp: base.cpp crypto.cpp ssh.cpp sftp.cpp win32.cpp Makefile
+sshd.cpp: $(SRC) Makefile
 	@printf '%s\n' $(AMALG_HEADER) > $@
-	@cat base.cpp >> $@
+	@cat src/base.cpp >> $@
 	@printf '\n' >> $@
-	@cat crypto.cpp >> $@
+	@cat src/crypto.cpp >> $@
 	@printf '\n' >> $@
-	@cat ssh.cpp >> $@
+	@cat src/ssh.cpp >> $@
 	@printf '\n' >> $@
-	@cat sftp.cpp >> $@
+	@cat src/sftp.cpp >> $@
 	@printf '\n' >> $@
-	@grep -vE '^#include "(base|crypto|ssh|sftp)\.cpp"$$' win32.cpp >> $@
+	@grep -vE '^#include "(base|crypto|ssh|sftp)\.cpp"$$' src/win32.cpp >> $@
 
 clean:
 	rm -f sshd.exe sshd.cpp
