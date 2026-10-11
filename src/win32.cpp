@@ -15,6 +15,7 @@ enum : i32 {
     CP_UTF8                    = 65001,
     CREATE_ALWAYS              = 2,
     CREATE_NEW                 = 1,
+    CREATE_BREAKAWAY_FROM_JOB  = 0x01000000,
     CREATE_NO_WINDOW           = 0x08000000,
     CREATE_SUSPENDED           = 0x00000004,
     CREATE_UNICODE_ENVIRONMENT = 0x00000400,
@@ -46,6 +47,7 @@ enum : i32 {
     STARTF_USESTDHANDLES       = 0x100,
     STD_ERROR_HANDLE           = -12,
     STD_INPUT_HANDLE           = -10,
+    STD_OUTPUT_HANDLE          = -11,
     WAIT_OBJECT_0              = 0,
     AF_INET                    = 2,
     SOCK_STREAM                = 1,
@@ -83,6 +85,18 @@ struct StartupInfo {  // STARTUPINFOW
     void *lpReserved2;
     uz  hStdInput, hStdOutput, hStdError;
 };
+
+struct JobLimits {  // JOBOBJECT_EXTENDED_LIMIT_INFORMATION
+    i64 proctime, jobtime;
+    u32 flags;
+    uz  minws, maxws;
+    u32 activeprocs;
+    uz  affinity;
+    u32 priority, scheduling;
+    u64 io[6];
+    uz  procmem, jobmem, peakprocmem, peakjobmem;
+};
+static_assert(sizeof(JobLimits) == (sizeof(uz)==4 ? 112 : 144), "");
 
 struct ProcessInfo {  // PROCESS_INFORMATION
     uz  hProcess;
@@ -168,7 +182,9 @@ W32(void,   EnterCriticalSection(void *));
 W32(void,   ExitProcess[[noreturn]](u32));
 W32(b32,    FreeEnvironmentStringsW(u16 *));
 W32(u16 *,  GetCommandLineW());
+W32(uz,     GetCurrentProcess());
 W32(u32,    GetEnvironmentVariableW(u16 const *, u16 *, u32));
+W32(b32,    IsProcessInJob(uz, uz, b32 *));
 W32(u16 *,  GetEnvironmentStringsW());
 W32(b32,    GetExitCodeProcess(uz, u32 *));
 W32(u32,    GetFileAttributesW(u16 const *));
@@ -186,7 +202,9 @@ W32(b32,    QueryInformationJobObject(uz, i32, void *, u32, u32 *));
 W32(b32,    ReadFile(uz, void *, u32, u32 *, void *));
 W32(u32,    ResumeThread(uz));
 W32(b32,    SetConsoleMode(uz, u32));
+W32(b32,    SetEnvironmentVariableW(u16 const *, u16 const *));
 W32(b32,    SetEvent(uz));
+W32(b32,    SetInformationJobObject(uz, i32, void *, u32));
 W32(b32,    SetHandleInformation(uz, u32, u32));
 W32(void,   Sleep(u32));
 W32(b32,    TerminateJobObject(uz, u32));
@@ -867,6 +885,15 @@ static b32 proc_spawn(Proc *p, Str shell, Str cmd, b32 interactive,
             // Fails if sshd itself runs in a job; then only the shell can
             // be killed, as before.
             uz job = CreateJobObjectW(0, 0);
+            if (job) {
+                // XP cannot nest jobs, so let an sshd started in this
+                // session leave it (escapejob).
+                enum { JobObjectExtendedLimitInformation = 9 };
+                JobLimits lim = {};
+                lim.flags = 0x800;  // JOB_OBJECT_LIMIT_BREAKAWAY_OK
+                SetInformationJobObject(job, JobObjectExtendedLimitInformation,
+                                        &lim, sizeof(lim));
+            }
             if (job && !AssignProcessToJobObject(job, pi.hProcess)) {
                 CloseHandle(job);
                 job = 0;
@@ -1548,6 +1575,44 @@ static void parse_args(Arena *a)
     }
 }
 
+// Sessions need job objects, which XP cannot nest, so a server started
+// inside a job (such as another sshd's session) relaunches itself
+// outside it when the job allows. An environment variable stops a loop.
+static void escapejob(Arena scratch)
+{
+    u16 const *name = (u16 const *)u"SSHD_ESCAPED_JOB";
+    u16 guard[2];
+    if (GetEnvironmentVariableW(name, guard, 2)) {
+        SetEnvironmentVariableW(name, 0);  // keep it from sessions
+        return;
+    }
+    b32 injob = 0;
+    if (!IsProcessInJob(GetCurrentProcess(), 0, &injob) || !injob) {
+        return;
+    }
+
+    u16 *cmd = GetCommandLineW();
+    iz   len = wstrlen(cmd);
+    u16 *dup = alloc<u16>(&scratch, len+1);
+    for (iz i = 0; i < len; i++) {
+        dup[i] = cmd[i];
+    }
+
+    SetEnvironmentVariableW(name, (u16 const *)u"1");
+    StartupInfo si = {};
+    si.cb         = sizeof(si);
+    si.dwFlags    = STARTF_USESTDHANDLES;
+    si.hStdInput  = GetStdHandle(STD_INPUT_HANDLE);
+    si.hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE);
+    si.hStdError  = GetStdHandle(STD_ERROR_HANDLE);
+    ProcessInfo pi = {};
+    if (CreateProcessW(0, dup, 0, 0, 1, CREATE_BREAKAWAY_FROM_JOB, 0, 0,
+                       &si, &pi)) {
+        ExitProcess(0);
+    }
+    SetEnvironmentVariableW(name, 0);
+}
+
 extern "C" __attribute((force_align_arg_pointer))
 void mainCRTStartup()
 {
@@ -1566,6 +1631,7 @@ void mainCRTStartup()
     if (selftest_flag) {
         ExitProcess(selftest(&a) ? 1 : 0);
     }
+    escapejob(a);
 
     // A QuickEdit selection in the console blocks writes to it, which
     // would stall every thread at os_log while holding log_lock.

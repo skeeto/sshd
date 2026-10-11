@@ -64,6 +64,10 @@ tests and exits.
 lines are honored. Lines with options (`from=`, `command=`,
 `restrict`, ...) or other key types are skipped.
 
+A server started inside a Windows job object, such as from a session of
+another sshd, relaunches itself outside that job when the job allows it,
+since XP cannot nest jobs and each session needs its own.
+
 The Windows Firewall may block the first time `sshd.exe` listens. The
 exception it grants applies to that executable path, so a binary at a
 new path needs a new exception.
