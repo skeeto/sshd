@@ -72,6 +72,27 @@ The Windows Firewall may block the first time `sshd.exe` listens. The
 exception it grants applies to that executable path, so a binary at a
 new path needs a new exception.
 
+## GUI testing with winctl
+
+`winctl.exe` is a separate companion program for driving GUI programs
+over SSH: it lists windows, captures them as PNG on standard output,
+waits for them, and sends them mouse and keyboard input. Since sshd
+runs commands as the console user, programs started over SSH appear on
+that desktop. `make` builds it alongside `sshd.exe`, or build it on the
+target from its single source file:
+
+    $ cc -nostartfiles -o winctl.exe src/winctl.cpp -lgdi32
+
+For example:
+
+    $ ssh host winctl run notepad.exe
+    $ ssh host winctl wait class=Notepad
+    $ ssh host winctl type class=Notepad "'hello, world'"
+    $ ssh host winctl shot class=Notepad > notepad.png
+
+See [winctl.md](winctl.md) for every command, coordinate conventions,
+exit statuses, and pitfalls.
+
 ## Interactive sessions
 
 Windows XP has no pseudo-terminals, so when a client requests a pty (as
