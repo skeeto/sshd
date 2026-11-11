@@ -608,6 +608,19 @@ static b32 is_powershell(Str shell)
     return str_contains_ci(base, "powershell") || str_contains_ci(base, "pwsh");
 }
 
+// cmd.exe and command.com only understand /c, not -c; XP ships only these
+static b32 is_cmd(Str shell)
+{
+    iz start = 0;
+    for (iz i = 0; i < shell.len; i++) {
+        if (shell.data[i]=='\\' || shell.data[i]=='/') {
+            start = i + 1;
+        }
+    }
+    Str base = {shell.data + start, shell.len - start};
+    return str_contains_ci(base, "cmd.exe") || str_contains_ci(base, "command.com");
+}
+
 static void append_arg(u8 *buf, iz cap, iz *len, Str arg)
 {
     b32 quote = arg.len == 0;
@@ -815,7 +828,8 @@ static StdinQueue *stdinq_start(uz pipe)
 static b32 proc_spawn(Proc *p, Str shell, Str cmd, b32 interactive,
                       Slice<Str> names, Slice<Str> vals, Arena *a)
 {
-    b32 pwsh = is_powershell(shell);
+    b32 pwsh  = is_powershell(shell);
+    b32 cmdex = !pwsh && is_cmd(shell);
 
     Str argv[8];
     i32 argc = 0;
@@ -827,7 +841,7 @@ static b32 proc_spawn(Proc *p, Str shell, Str cmd, b32 interactive,
             argv[argc++] = "-Command";
             argv[argc++] = cmd;
         } else {
-            argv[argc++] = "-c";
+            argv[argc++] = cmdex ? "/c" : "-c";
             argv[argc++] = cmd;
         }
     } else if (pwsh) {
@@ -835,14 +849,25 @@ static b32 proc_spawn(Proc *p, Str shell, Str cmd, b32 interactive,
         argv[argc++] = "-NoProfile";
         argv[argc++] = "-Command";
         argv[argc++] = "-";
-    } else if (interactive) {
+    } else if (interactive && !cmdex) {
         argv[argc++] = "-i";  // prompts, though stdin is a pipe
     }
 
-    u8 *line = allocbytes(a, 4096);
+    u8 *line = allocbytes(a, 8192);
     iz  linelen = 0;
-    for (i32 i = 0; i < argc; i++) {
-        append_arg(line, 4096 - 1, &linelen, argv[i]);
+    if (cmdex && cmd.len) {
+        // cmd.exe parses its own command line: extra quoting or backslash
+        // escaping is taken literally, breaking any quoted remote command.
+        line[linelen++] = '"';
+        for (iz i = 0; i < shell.len && linelen < 8190; i++) line[linelen++] = shell.data[i];
+        line[linelen++] = '"';
+        const char kw[] = " /c ";
+        for (iz i = 0; i < 4; i++) line[linelen++] = kw[i];
+        for (iz i = 0; i < cmd.len && linelen < 8190; i++) line[linelen++] = cmd.data[i];
+    } else {
+        for (i32 i = 0; i < argc; i++) {
+            append_arg(line, 8191, &linelen, argv[i]);
+        }
     }
 
     u16 *wline = utf8_to_wide_alloc(a, Str{line, linelen});
